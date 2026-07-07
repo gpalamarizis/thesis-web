@@ -1,7 +1,5 @@
 {
-  "build": {
-    "builder": "dockerfile"
-  },
+  "build": { "builder": "dockerfile" },
   "deploy": {
     "startCommand": "node server.js",
     "restartPolicyType": "on_failure",
