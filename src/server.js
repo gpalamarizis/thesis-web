@@ -63,7 +63,6 @@ app.use('/api/reports',   require('./routes/reports'));
 app.use('/api/phonebook', require('./routes/phonebook'));
 app.use('/api/finance',   require('./routes/finance'));
 app.use('/api/documents', require('./routes/documents'));
-app.use('/api/admin', require('./routes/admin-migrate'));
 
 // --- 404 & Error handler -----------------------------------------
 app.use((req, res) => {
