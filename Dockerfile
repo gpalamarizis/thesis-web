@@ -1,7 +1,18 @@
-FROM node:18-alpine
+FROM node:20-alpine
+
 WORKDIR /app
-COPY package.json .
-RUN npm install
+
+# Install deps first (cache-friendly)
+COPY package*.json ./
+RUN npm ci --omit=dev || npm install --omit=dev
+
+# Copy source
 COPY . .
+
+# Railway sets PORT automatically; expose default for clarity
+ENV NODE_ENV=production
 EXPOSE 3000
-CMD ["node", "server.js"]
+
+# Χρήση του σωστού entry point (src/server.js).
+# Το v2 είχε πάθει bug με λάθος path εδώ - προσοχή.
+CMD ["node", "src/server.js"]
