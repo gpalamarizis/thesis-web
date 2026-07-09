@@ -1,4 +1,4 @@
-// Thesis Web v3 — Main entry point
+// Thesis Web v3 â€” Main entry point
 // Node 18+, Express 4, PostgreSQL, JWT auth
 
 require('dotenv').config();
@@ -13,19 +13,19 @@ const app = express();
 
 // --- Middleware ---------------------------------------------------
 app.use(helmet({
-  contentSecurityPolicy: false,      // API only — δεν σερβίρει HTML
+  contentSecurityPolicy: false,      // API only â€” Î´ÎµÎ½ ÏƒÎµÏÎ²Î¯ÏÎµÎ¹ HTML
   crossOriginResourcePolicy: false,
 }));
 
 app.use(cors({
-  origin: (origin, cb) => cb(null, true),  // επιτρέπει όλα (Cloudflare frontend)
+  origin: (origin, cb) => cb(null, true),  // ÎµÏ€Î¹Ï„ÏÎ­Ï€ÎµÎ¹ ÏŒÎ»Î± (Cloudflare frontend)
   credentials: true,
 }));
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// Απλό request log
+// Î‘Ï€Î»ÏŒ request log
 app.use((req, _res, next) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
   next();
@@ -52,6 +52,7 @@ app.get('/health', async (_req, res) => {
 
 // --- Routes -------------------------------------------------------
 app.use('/api/auth',      require('./routes/auth'));
+app.use('/api/users',     require('./routes/users'));
 app.use('/api/cases',     require('./routes/cases'));
 app.use('/api/fysika',    require('./routes/fysika'));
 app.use('/api/nomika',    require('./routes/nomika'));
