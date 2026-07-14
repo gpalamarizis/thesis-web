@@ -201,5 +201,138 @@ router.delete('/other/:id', async (req, res) => {
     res.json({ deleted: r.rows[0].aa });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
+// =============================================================================
+// ADD THIS TO src/routes/actions.js (BACKEND)
+// Paste anywhere after the existing court routes, BEFORE the `module.exports = router;`
+// =============================================================================
+
+// ---------- Λοιπές ενέργειες (energeies table) ----------
+
+const ENERGEIA_FIELDS = [
+  'ypotheseis_id', 'date_dead_line', 'perigrafi_energias', 'ekkremis', 'dikigoros_id'
+];
+
+// GET /api/actions/task?ypothesi_id=..  (accepts both ypothesi_id and ypotheseis_id)
+router.get('/task', async (req, res) => {
+  const orgId = req.user.organization_id;
+  const ypId = req.query.ypothesi_id || req.query.ypotheseis_id;
+  const filters = ['y.organization_id = $1'];
+  const params  = [orgId];
+  let i = 2;
+  if (ypId) {
+    filters.push(`e.ypotheseis_id = $${i}`); params.push(parseInt(ypId, 10)); i++;
+  }
+  if (req.query.from) { filters.push(`e.date_dead_line >= $${i}`); params.push(req.query.from); i++; }
+  if (req.query.to)   { filters.push(`e.date_dead_line <= $${i}`); params.push(req.query.to);   i++; }
+  if (req.query.ekkremis !== undefined) {
+    filters.push(`e.ekkremis = $${i}`);
+    params.push(req.query.ekkremis === 'true' || req.query.ekkremis === '1');
+    i++;
+  }
+  try {
+    const r = await pool.query(
+      `SELECT e.*,
+              y.xeirokinito_id,
+              CONCAT_WS(' ', u.first_name, u.last_name) AS dikigoros_name
+         FROM energeies e
+         LEFT JOIN ypotheseis y ON y.aa = e.ypotheseis_id
+         LEFT JOIN users u ON u.id = e.dikigoros_id
+        WHERE ${filters.join(' AND ')}
+        ORDER BY e.date_dead_line ASC NULLS LAST LIMIT 500`,
+      params
+    );
+    res.json({ data: r.rows });
+  } catch (err) {
+    console.error('[actions/task list]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/actions/task
+router.post('/task', async (req, res) => {
+  const orgId = req.user.organization_id;
+  const body = req.body || {};
+  const ypId = body.ypothesi_id || body.ypotheseis_id;
+  if (!ypId) return res.status(400).json({ error: 'ypothesi_id required' });
+
+  try {
+    // verify case belongs to org
+    const check = await pool.query(
+      'SELECT aa FROM ypotheseis WHERE aa = $1 AND organization_id = $2',
+      [parseInt(ypId, 10), orgId]
+    );
+    if (check.rows.length === 0) return res.status(404).json({ error: 'Case not found' });
+
+    const r = await pool.query(
+      `INSERT INTO energeies (ypotheseis_id, date_dead_line, perigrafi_energias, ekkremis, dikigoros_id)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING *`,
+      [
+        parseInt(ypId, 10),
+        body.date_dead_line || null,
+        body.perigrafi_energias || null,
+        body.ekkremis !== false,
+        body.dikigoros_id ? parseInt(body.dikigoros_id, 10) : null,
+      ]
+    );
+    res.status(201).json({ data: r.rows[0] });
+  } catch (err) {
+    console.error('[actions/task create]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PUT /api/actions/task/:id
+router.put('/task/:id', async (req, res) => {
+  const orgId = req.user.organization_id;
+  const body = req.body || {};
+  try {
+    // Verify ownership via join
+    const own = await pool.query(
+      `SELECT e.aa FROM energeies e
+         JOIN ypotheseis y ON y.aa = e.ypotheseis_id
+        WHERE e.aa = $1 AND y.organization_id = $2`,
+      [req.params.id, orgId]
+    );
+    if (own.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+
+    const fields = [];
+    const params = [];
+    let i = 1;
+    if (body.date_dead_line !== undefined)     { fields.push(`date_dead_line = $${i++}`);     params.push(body.date_dead_line); }
+    if (body.perigrafi_energias !== undefined) { fields.push(`perigrafi_energias = $${i++}`); params.push(body.perigrafi_energias); }
+    if (body.ekkremis !== undefined)           { fields.push(`ekkremis = $${i++}`);           params.push(!!body.ekkremis); }
+    if (body.dikigoros_id !== undefined)       { fields.push(`dikigoros_id = $${i++}`);       params.push(body.dikigoros_id ? parseInt(body.dikigoros_id, 10) : null); }
+    if (fields.length === 0) return res.status(400).json({ error: 'No changes' });
+    params.push(req.params.id);
+    const r = await pool.query(
+      `UPDATE energeies SET ${fields.join(', ')} WHERE aa = $${i} RETURNING *`,
+      params
+    );
+    res.json({ data: r.rows[0] });
+  } catch (err) {
+    console.error('[actions/task update]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/actions/task/:id
+router.delete('/task/:id', async (req, res) => {
+  const orgId = req.user.organization_id;
+  try {
+    const own = await pool.query(
+      `SELECT e.aa FROM energeies e
+         JOIN ypotheseis y ON y.aa = e.ypotheseis_id
+        WHERE e.aa = $1 AND y.organization_id = $2`,
+      [req.params.id, orgId]
+    );
+    if (own.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+    await pool.query('DELETE FROM energeies WHERE aa = $1', [req.params.id]);
+    res.status(204).end();
+  } catch (err) {
+    console.error('[actions/task delete]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 module.exports = router;

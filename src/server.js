@@ -1,4 +1,4 @@
-// Thesis Web v3 â€” Main entry point
+// Thesis Web v3 Ã¢â‚¬â€ Main entry point
 // Node 18+, Express 4, PostgreSQL, JWT auth
 
 require('dotenv').config();
@@ -13,19 +13,19 @@ const app = express();
 
 // --- Middleware ---------------------------------------------------
 app.use(helmet({
-  contentSecurityPolicy: false,      // API only â€” Î´ÎµÎ½ ÏƒÎµÏÎ²Î¯ÏÎµÎ¹ HTML
+  contentSecurityPolicy: false,      // API only Ã¢â‚¬â€ ÃŽÂ´ÃŽÂµÃŽÂ½ ÃÆ’ÃŽÂµÃÂÃŽÂ²ÃŽÂ¯ÃÂÃŽÂµÃŽÂ¹ HTML
   crossOriginResourcePolicy: false,
 }));
 
 app.use(cors({
-  origin: (origin, cb) => cb(null, true),  // ÎµÏ€Î¹Ï„ÏÎ­Ï€ÎµÎ¹ ÏŒÎ»Î± (Cloudflare frontend)
+  origin: (origin, cb) => cb(null, true),  // ÃŽÂµÃâ‚¬ÃŽÂ¹Ãâ€žÃÂÃŽÂ­Ãâ‚¬ÃŽÂµÃŽÂ¹ ÃÅ’ÃŽÂ»ÃŽÂ± (Cloudflare frontend)
   credentials: true,
 }));
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// Î‘Ï€Î»ÏŒ request log
+// ÃŽâ€˜Ãâ‚¬ÃŽÂ»ÃÅ’ request log
 app.use((req, _res, next) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
   next();
@@ -64,6 +64,7 @@ app.use('/api/reports',   require('./routes/reports'));
 app.use('/api/phonebook', require('./routes/phonebook'));
 app.use('/api/finance',   require('./routes/finance'));
 app.use('/api/documents', require('./routes/documents'));
+app.use('/api/case-related-persons', require('./routes/case-related-persons'));
 
 // --- 404 & Error handler -----------------------------------------
 app.use((req, res) => {
