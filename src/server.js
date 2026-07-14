@@ -1,4 +1,4 @@
-// Thesis Web v3 Ã¢â‚¬â€ Main entry point
+// Thesis Web v3 ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â Main entry point
 // Node 18+, Express 4, PostgreSQL, JWT auth
 
 require('dotenv').config();
@@ -13,19 +13,19 @@ const app = express();
 
 // --- Middleware ---------------------------------------------------
 app.use(helmet({
-  contentSecurityPolicy: false,      // API only Ã¢â‚¬â€ ÃŽÂ´ÃŽÂµÃŽÂ½ ÃÆ’ÃŽÂµÃÂÃŽÂ²ÃŽÂ¯ÃÂÃŽÂµÃŽÂ¹ HTML
+  contentSecurityPolicy: false,      // API only ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â ÃƒÅ½Ã‚Â´ÃƒÅ½Ã‚ÂµÃƒÅ½Ã‚Â½ ÃƒÂÃ†â€™ÃƒÅ½Ã‚ÂµÃƒÂÃ‚ÂÃƒÅ½Ã‚Â²ÃƒÅ½Ã‚Â¯ÃƒÂÃ‚ÂÃƒÅ½Ã‚ÂµÃƒÅ½Ã‚Â¹ HTML
   crossOriginResourcePolicy: false,
 }));
 
 app.use(cors({
-  origin: (origin, cb) => cb(null, true),  // ÃŽÂµÃâ‚¬ÃŽÂ¹Ãâ€žÃÂÃŽÂ­Ãâ‚¬ÃŽÂµÃŽÂ¹ ÃÅ’ÃŽÂ»ÃŽÂ± (Cloudflare frontend)
+  origin: (origin, cb) => cb(null, true),  // ÃƒÅ½Ã‚ÂµÃƒÂÃ¢â€šÂ¬ÃƒÅ½Ã‚Â¹ÃƒÂÃ¢â‚¬Å¾ÃƒÂÃ‚ÂÃƒÅ½Ã‚Â­ÃƒÂÃ¢â€šÂ¬ÃƒÅ½Ã‚ÂµÃƒÅ½Ã‚Â¹ ÃƒÂÃ…â€™ÃƒÅ½Ã‚Â»ÃƒÅ½Ã‚Â± (Cloudflare frontend)
   credentials: true,
 }));
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// ÃŽâ€˜Ãâ‚¬ÃŽÂ»ÃÅ’ request log
+// ÃƒÅ½Ã¢â‚¬ËœÃƒÂÃ¢â€šÂ¬ÃƒÅ½Ã‚Â»ÃƒÂÃ…â€™ request log
 app.use((req, _res, next) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
   next();
@@ -65,6 +65,7 @@ app.use('/api/phonebook', require('./routes/phonebook'));
 app.use('/api/finance',   require('./routes/finance'));
 app.use('/api/documents', require('./routes/documents'));
 app.use('/api/case-related-persons', require('./routes/case-related-persons'));
+app.use('/api/case-related-cases',   require('./routes/case-related-cases'));
 
 // --- 404 & Error handler -----------------------------------------
 app.use((req, res) => {

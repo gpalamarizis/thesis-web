@@ -290,5 +290,53 @@ router.delete('/:id', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+// =============================================================================
+// ADD THIS TO src/routes/cases.js (BACKEND)
+// Paste anywhere before the `module.exports = router;` at the end
+// =============================================================================
+
+// GET /api/cases/:id/same-client  →  other cases of the same client (fysiko or nomiko)
+router.get('/:id/same-client', async (req, res) => {
+  const orgId = req.user.organization_id;
+  const caseId = parseInt(req.params.id, 10);
+  try {
+    const cur = await pool.query(
+      `SELECT fysiko_prosopo_id, nomiko_prosopo_id
+         FROM ypotheseis
+        WHERE aa = $1 AND organization_id = $2`,
+      [caseId, orgId]
+    );
+    if (cur.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+
+    const { fysiko_prosopo_id, nomiko_prosopo_id } = cur.rows[0];
+    if (!fysiko_prosopo_id && !nomiko_prosopo_id) return res.json({ data: [] });
+
+    const params = [orgId, caseId];
+    let clientFilter;
+    if (fysiko_prosopo_id) {
+      params.push(fysiko_prosopo_id);
+      clientFilter = `y.fysiko_prosopo_id = $${params.length}`;
+    } else {
+      params.push(nomiko_prosopo_id);
+      clientFilter = `y.nomiko_prosopo_id = $${params.length}`;
+    }
+
+    const r = await pool.query(
+      `SELECT y.aa, y.xeirokinito_id, y.perilipsi, y.date_eisagogis, y.date_telous, y.ekkremis,
+              y.onomasia_fakelou
+         FROM ypotheseis y
+        WHERE y.organization_id = $1
+          AND y.aa != $2
+          AND ${clientFilter}
+        ORDER BY y.date_eisagogis DESC NULLS LAST
+        LIMIT 100`,
+      params
+    );
+    res.json({ data: r.rows });
+  } catch (err) {
+    console.error('[cases/same-client]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 module.exports = router;
