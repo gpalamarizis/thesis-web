@@ -7,7 +7,7 @@ const router = express.Router();
 router.use(requireAuth);
 
 const FIELDS = [
-  'diakritikos_titlos', 'eponymia', 'afm', 'doy',
+  'diakritikos_titlos', 'eponymia', 'afm', 'doy', 'gemi',
   'email', 'web_site', 'energos',
   'odos', 'arithmos', 'tk', 'poli', 'xora',
   'tilefono_grafeiou_1', 'tilefono_grafeiou_2', 'tilefono_grafeiou_3',
