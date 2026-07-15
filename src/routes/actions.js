@@ -6,16 +6,33 @@ const { pickAllowed } = require('../utils/query');
 const router = express.Router();
 router.use(requireAuth);
 
+let courtActionColumnsEnsured = false;
+async function ensureCourtActionColumns() {
+  if (courtActionColumnsEnsured) return;
+  try {
+    await pool.query(`
+      ALTER TABLE dikastiria_energeies
+        ADD COLUMN IF NOT EXISTS date_apofasis DATE,
+        ADD COLUMN IF NOT EXISTS ekkremis      BOOLEAN DEFAULT TRUE;
+    `);
+    courtActionColumnsEnsured = true;
+  } catch (err) {
+    console.error('[ensureCourtActionColumns]', err);
+  }
+}
+
 const DIK_FIELDS = [
   'ypothesi_id','name','date','dikastirio_id','tmima_id','city_id',
   'antidikos_id','diadikasia_id','pinakio',
   'dikigoros_antidikou_id','dikastis_id','grammateas_id',
+  'date_apofasis','ekkremis',
 ];
 
 // ---------- Δικαστικές ενέργειες ----------
 
 // GET /api/actions/court?ypothesi_id=..
 router.get('/court', async (req, res) => {
+  await ensureCourtActionColumns();
   const orgId = req.user.organization_id;
   const filters = ['de.organization_id = $1'];
   const params  = [orgId];
@@ -57,6 +74,7 @@ router.get('/court', async (req, res) => {
 });
 
 router.post('/court', async (req, res) => {
+  await ensureCourtActionColumns();
   const data = pickAllowed(req.body || {}, DIK_FIELDS);
   if (!data.ypothesi_id || !data.date) return res.status(400).json({ error: 'ypothesi_id + date required' });
 
@@ -73,6 +91,7 @@ router.post('/court', async (req, res) => {
 });
 
 router.put('/court/:id', async (req, res) => {
+  await ensureCourtActionColumns();
   const data = pickAllowed(req.body || {}, DIK_FIELDS);
   const cols = Object.keys(data);
   if (cols.length === 0) return res.status(400).json({ error: 'no fields' });
@@ -89,6 +108,7 @@ router.put('/court/:id', async (req, res) => {
 });
 
 router.delete('/court/:id', async (req, res) => {
+  await ensureCourtActionColumns();
   try {
     const r = await pool.query(
       `DELETE FROM dikastiria_energeies WHERE aa = $1 AND organization_id = $2 RETURNING aa`,

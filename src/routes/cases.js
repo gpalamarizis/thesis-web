@@ -338,5 +338,167 @@ router.get('/:id/same-client', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+// =============================================================================
+// ADD THIS TO src/routes/cases.js (BACKEND)
+// Paste anywhere before the `module.exports = router;` at the end.
+//
+// Requires pg_trgm extension. Auto-enabled on first call.
+// =============================================================================
+
+let suggestionsInitialized = false;
+async function ensureSuggestionsSchema() {
+  if (suggestionsInitialized) return;
+  await pool.query(`
+    CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
+    CREATE TABLE IF NOT EXISTS case_suggestion_feedback (
+      aa                  BIGSERIAL PRIMARY KEY,
+      organization_id     BIGINT NOT NULL,
+      ypothesi_id         BIGINT NOT NULL,
+      suggested_case_id   BIGINT NOT NULL,
+      feedback            SMALLINT NOT NULL,
+      created_by          BIGINT,
+      created_at          TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE (organization_id, ypothesi_id, suggested_case_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_csf_case ON case_suggestion_feedback (ypothesi_id);
+  `);
+  suggestionsInitialized = true;
+}
+
+// GET /api/cases/:id/suggestions
+router.get('/:id/suggestions', async (req, res) => {
+  await ensureSuggestionsSchema();
+  const orgId = req.user.organization_id;
+  const caseId = parseInt(req.params.id, 10);
+
+  try {
+    const curR = await pool.query(
+      `SELECT aa, fysiko_prosopo_id, nomiko_prosopo_id, diadikos_id, perilipsi
+         FROM ypotheseis
+        WHERE aa = $1 AND organization_id = $2`,
+      [caseId, orgId]
+    );
+    if (curR.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+    const cur = curR.rows[0];
+
+    const connR = await pool.query(
+      `SELECT CASE WHEN ypothesi_id = $1 THEN related_ypothesi_id ELSE ypothesi_id END AS other_id
+         FROM case_related_cases
+        WHERE ypothesi_id = $1 OR related_ypothesi_id = $1`,
+      [caseId]
+    );
+    const connectedIds = connR.rows.map(r => Number(r.other_id));
+
+    const rejR = await pool.query(
+      `SELECT suggested_case_id
+         FROM case_suggestion_feedback
+        WHERE organization_id = $1 AND ypothesi_id = $2 AND feedback = -1`,
+      [orgId, caseId]
+    );
+    const rejectedIds = rejR.rows.map(r => Number(r.suggested_case_id));
+
+    // Learning signal: features common to already-connected cases
+    let learnedFysika = [], learnedNomika = [], learnedDiadikoi = [];
+    if (connectedIds.length > 0) {
+      const feats = await pool.query(
+        `SELECT fysiko_prosopo_id, nomiko_prosopo_id, diadikos_id
+           FROM ypotheseis
+          WHERE aa = ANY($1::bigint[])`,
+        [connectedIds]
+      );
+      feats.rows.forEach(f => {
+        if (f.fysiko_prosopo_id) learnedFysika.push(f.fysiko_prosopo_id);
+        if (f.nomiko_prosopo_id) learnedNomika.push(f.nomiko_prosopo_id);
+        if (f.diadikos_id)       learnedDiadikoi.push(f.diadikos_id);
+      });
+    }
+
+    const excludeIds = [caseId, ...rejectedIds, ...connectedIds];
+    const useText = cur.perilipsi && cur.perilipsi.trim().length > 5;
+
+    const candR = await pool.query(
+      `SELECT y.aa, y.xeirokinito_id, y.perilipsi, y.date_eisagogis, y.ekkremis,
+              y.fysiko_prosopo_id, y.nomiko_prosopo_id, y.diadikos_id,
+              COALESCE(fp.eponymo || ' ' || COALESCE(fp.onoma, ''), np.eponymia) AS pelatis,
+              ${useText ? 'similarity(y.perilipsi, $3)::float' : '0::float'} AS text_sim
+         FROM ypotheseis y
+         LEFT JOIN fysika_prosopa fp ON fp.aa = y.fysiko_prosopo_id
+         LEFT JOIN nomika_prosopa np ON np.aa = y.nomiko_prosopo_id
+        WHERE y.organization_id = $1
+          AND y.aa <> ALL($2::bigint[])
+        LIMIT 500`,
+      useText ? [orgId, excludeIds, cur.perilipsi] : [orgId, excludeIds]
+    );
+
+    const scored = candR.rows.map(y => {
+      let score = 0;
+      const reasons = [];
+
+      if (cur.fysiko_prosopo_id && y.fysiko_prosopo_id === cur.fysiko_prosopo_id) {
+        score += 50; reasons.push('Ίδιος πελάτης');
+      } else if (cur.nomiko_prosopo_id && y.nomiko_prosopo_id === cur.nomiko_prosopo_id) {
+        score += 50; reasons.push('Ίδιος πελάτης');
+      }
+      if (cur.diadikos_id && y.diadikos_id === cur.diadikos_id) {
+        score += 30; reasons.push('Ίδιος αντίδικος');
+      }
+      if (y.text_sim > 0.15) {
+        score += Math.round(y.text_sim * 40);
+        reasons.push(`Παρόμοια περίληψη (${Math.round(y.text_sim * 100)}%)`);
+      }
+      let boost = 0;
+      if (y.fysiko_prosopo_id && learnedFysika.includes(y.fysiko_prosopo_id)) boost += 10;
+      if (y.nomiko_prosopo_id && learnedNomika.includes(y.nomiko_prosopo_id)) boost += 10;
+      if (y.diadikos_id       && learnedDiadikoi.includes(y.diadikos_id))     boost += 5;
+      if (boost > 0) {
+        score += boost;
+        reasons.push('Παρόμοιο μοτίβο με ήδη συνδεδεμένες');
+      }
+
+      return {
+        aa: y.aa,
+        xeirokinito_id: y.xeirokinito_id,
+        perilipsi: y.perilipsi,
+        date_eisagogis: y.date_eisagogis,
+        ekkremis: y.ekkremis,
+        pelatis: y.pelatis,
+        score,
+        reasons,
+      };
+    });
+
+    scored.sort((a, b) => b.score - a.score);
+    const top = scored.filter(s => s.score > 0).slice(0, 10);
+    res.json({ data: top });
+  } catch (err) {
+    console.error('[cases/suggestions]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/cases/:id/suggestions/feedback
+// body: { suggested_case_id, feedback: 1 (accepted) | -1 (rejected) }
+router.post('/:id/suggestions/feedback', async (req, res) => {
+  await ensureSuggestionsSchema();
+  const orgId = req.user.organization_id;
+  const caseId = parseInt(req.params.id, 10);
+  const { suggested_case_id, feedback } = req.body || {};
+  if (!suggested_case_id || (feedback !== 1 && feedback !== -1)) {
+    return res.status(400).json({ error: 'suggested_case_id and feedback (+1 or -1) required' });
+  }
+  try {
+    await pool.query(
+      `INSERT INTO case_suggestion_feedback (organization_id, ypothesi_id, suggested_case_id, feedback, created_by)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (organization_id, ypothesi_id, suggested_case_id) DO UPDATE SET feedback = EXCLUDED.feedback, created_at = NOW()`,
+      [orgId, caseId, parseInt(suggested_case_id, 10), feedback, req.user.sub || req.user.id || null]
+    );
+    res.status(204).end();
+  } catch (err) {
+    console.error('[cases/suggestions/feedback]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 module.exports = router;
