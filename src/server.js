@@ -1,4 +1,4 @@
-// Thesis Web v3 ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â Main entry point
+// Thesis Web v3 ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â Main entry point
 // Node 18+, Express 4, PostgreSQL, JWT auth
 
 require('dotenv').config();
@@ -13,19 +13,19 @@ const app = express();
 
 // --- Middleware ---------------------------------------------------
 app.use(helmet({
-  contentSecurityPolicy: false,      // API only ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â ÃƒÅ½Ã‚Â´ÃƒÅ½Ã‚ÂµÃƒÅ½Ã‚Â½ ÃƒÂÃ†â€™ÃƒÅ½Ã‚ÂµÃƒÂÃ‚ÂÃƒÅ½Ã‚Â²ÃƒÅ½Ã‚Â¯ÃƒÂÃ‚ÂÃƒÅ½Ã‚ÂµÃƒÅ½Ã‚Â¹ HTML
+  contentSecurityPolicy: false,      // API only ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã…Â½Ãƒâ€šÃ‚Â´ÃƒÆ’Ã…Â½Ãƒâ€šÃ‚ÂµÃƒÆ’Ã…Â½Ãƒâ€šÃ‚Â½ ÃƒÆ’Ã‚ÂÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã…Â½Ãƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂÃƒÆ’Ã…Â½Ãƒâ€šÃ‚Â²ÃƒÆ’Ã…Â½Ãƒâ€šÃ‚Â¯ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂÃƒÆ’Ã…Â½Ãƒâ€šÃ‚ÂµÃƒÆ’Ã…Â½Ãƒâ€šÃ‚Â¹ HTML
   crossOriginResourcePolicy: false,
 }));
 
 app.use(cors({
-  origin: (origin, cb) => cb(null, true),  // ÃƒÅ½Ã‚ÂµÃƒÂÃ¢â€šÂ¬ÃƒÅ½Ã‚Â¹ÃƒÂÃ¢â‚¬Å¾ÃƒÂÃ‚ÂÃƒÅ½Ã‚Â­ÃƒÂÃ¢â€šÂ¬ÃƒÅ½Ã‚ÂµÃƒÅ½Ã‚Â¹ ÃƒÂÃ…â€™ÃƒÅ½Ã‚Â»ÃƒÅ½Ã‚Â± (Cloudflare frontend)
+  origin: (origin, cb) => cb(null, true),  // ÃƒÆ’Ã…Â½Ãƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã…Â½Ãƒâ€šÃ‚Â¹ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂÃƒÆ’Ã…Â½Ãƒâ€šÃ‚Â­ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã…Â½Ãƒâ€šÃ‚ÂµÃƒÆ’Ã…Â½Ãƒâ€šÃ‚Â¹ ÃƒÆ’Ã‚ÂÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã…Â½Ãƒâ€šÃ‚Â»ÃƒÆ’Ã…Â½Ãƒâ€šÃ‚Â± (Cloudflare frontend)
   credentials: true,
 }));
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// ÃƒÅ½Ã¢â‚¬ËœÃƒÂÃ¢â€šÂ¬ÃƒÅ½Ã‚Â»ÃƒÂÃ…â€™ request log
+// ÃƒÆ’Ã…Â½ÃƒÂ¢Ã¢â€šÂ¬Ã‹Å“ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã…Â½Ãƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€¦Ã¢â‚¬â„¢ request log
 app.use((req, _res, next) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
   next();
@@ -66,6 +66,9 @@ app.use('/api/finance',   require('./routes/finance'));
 app.use('/api/documents', require('./routes/documents'));
 app.use('/api/case-related-persons', require('./routes/case-related-persons'));
 app.use('/api/case-related-cases',   require('./routes/case-related-cases'));
+app.use('/api/organization',      require('./routes/organization-settings'));
+app.use('/api/invoice-series',    require('./routes/invoice-series'));
+app.use('/api/invoices',          require('./routes/invoices'));
 
 // --- 404 & Error handler -----------------------------------------
 app.use((req, res) => {
