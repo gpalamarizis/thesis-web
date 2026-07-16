@@ -143,6 +143,80 @@ async function buildCaseData(caseId, orgId) {
     ? `${c.fp_eponymo || ''} ${c.fp_onoma || ''}`.trim()
     : (c.np_eponymia || c.np_diakritikos_titlos || '');
 
+  // ---- Xeiristes (multiple lawyers per case) ----
+  const xR = await pool.query(
+    `SELECT dg.aa, dg.eponymo, dg.onoma, dg.onoma_patros,
+            dg.ar_mitroou, dg.syllogos, dg.email, dg.mobile,
+            dg.afm, dg.doy
+       FROM xeiristes_dikigoroi xd
+       JOIN dikigoroi_grafeiou dg ON dg.aa = xd.dikigoroi_grafeiou_id
+      WHERE xd.ypotheseis_id = $1 AND xd.organization_id = $2
+      ORDER BY dg.eponymo, dg.onoma`,
+    [caseId, orgId]
+  );
+  const xeiristes = xR.rows;
+
+  // ---- Related persons of the case ----
+  const rpR = await pool.query(
+    `SELECT sp.aa, sp.eponymo, sp.onoma, sp.eponymia, sp.afm, sp.doy, sp.email,
+            sp.odos, sp.arithmos, sp.tk, sp.poli,
+            es.name AS role_name
+       FROM case_related_persons crp
+       JOIN ypotheseis y ON y.aa = crp.ypothesi_id
+       LEFT JOIN sxetika_prosopa sp ON sp.aa = crp.sxetiko_prosopo_id
+       LEFT JOIN eidos_sxesis    es ON es.aa = crp.eidos_sxesis_id
+      WHERE y.organization_id = $1 AND crp.ypothesi_id = $2
+      ORDER BY crp.created_at ASC`,
+    [orgId, caseId]
+  );
+  const relatedPersons = rpR.rows;
+
+  const xNameFull = (x) => `${x.eponymo || ''} ${x.onoma || ''}`.trim();
+  const rNameFull = (r) => (r.eponymia && r.eponymia.trim())
+    ? r.eponymia
+    : `${r.eponymo || ''} ${r.onoma || ''}`.trim();
+
+  // Individual placeholders for top 5 lawyers
+  const xeiristesFields = {};
+  for (let i = 0; i < 5; i++) {
+    const x = xeiristes[i] || {};
+    const n = i + 1;
+    xeiristesFields[`XEIRISTIS_${n}_FULL_NAME`] = xNameFull(x);
+    xeiristesFields[`XEIRISTIS_${n}_EPONYMO`]   = x.eponymo || '';
+    xeiristesFields[`XEIRISTIS_${n}_ONOMA`]     = x.onoma || '';
+    xeiristesFields[`XEIRISTIS_${n}_AM`]        = x.ar_mitroou || '';
+    xeiristesFields[`XEIRISTIS_${n}_SYLLOGOS`]  = x.syllogos || '';
+    xeiristesFields[`XEIRISTIS_${n}_EMAIL`]     = x.email || '';
+    xeiristesFields[`XEIRISTIS_${n}_MOBILE`]    = x.mobile || '';
+    xeiristesFields[`XEIRISTIS_${n}_AFM`]       = x.afm || '';
+  }
+
+  // Individual placeholders for top 5 related persons
+  const relatedFields = {};
+  for (let i = 0; i < 5; i++) {
+    const r = relatedPersons[i] || {};
+    const n = i + 1;
+    relatedFields[`RELATED_${n}_FULL_NAME`] = r.aa ? rNameFull(r) : '';
+    relatedFields[`RELATED_${n}_ROLE`]     = r.role_name || '';
+    relatedFields[`RELATED_${n}_AFM`]      = r.afm || '';
+    relatedFields[`RELATED_${n}_DOY`]      = r.doy || '';
+    relatedFields[`RELATED_${n}_EMAIL`]    = r.email || '';
+    relatedFields[`RELATED_${n}_DIEYTHYNSI`] = [r.odos, r.arithmos, r.tk, r.poli].filter(Boolean).join(' ');
+  }
+
+  // Comma-separated summaries
+  const XEIRISTES_ALL   = xeiristes.map(xNameFull).filter(Boolean).join(', ');
+  const XEIRISTES_FORMAL = xeiristes.map(x => {
+    const name = xNameFull(x);
+    const parts = [];
+    if (x.ar_mitroou) parts.push(`Α.Μ. ${x.syllogos || 'ΔΣΑ'} ${x.ar_mitroou}`);
+    return parts.length ? `${name} (${parts.join(', ')})` : name;
+  }).filter(Boolean).join(', ');
+  const RELATED_ALL = relatedPersons.map(r => {
+    const name = rNameFull(r);
+    return r.role_name ? `${name} (${r.role_name})` : name;
+  }).filter(Boolean).join(', ');
+
   return {
     // ---- Case ----
     XEIROKINITO_ID:    c.xeirokinito_id || '',
@@ -198,7 +272,16 @@ async function buildCaseData(caseId, orgId) {
     OFFICE_IBAN:     o.iban || '',
     OFFICE_TRAPEZA:  o.trapeza || '',
 
-    // ---- Date ----
+    // ---- Xeiristes (multiple) ----
+    XEIRISTES_ALL,
+    XEIRISTES_FORMAL,
+    ...xeiristesFields,
+
+    // ---- Related persons ----
+    RELATED_ALL,
+    ...relatedFields,
+
+        // ---- Date ----
     DATE_TODAY:        greekDateShort(new Date()),
     DATE_TODAY_GREEK:  greekDateLong(new Date()),
     DATE_TODAY_LONG:   greekDateLong(new Date()),
@@ -423,6 +506,20 @@ router.get('/placeholders/help', async (req, res) => {
       ]},
       { category: 'Αντίδικος', vars: [
         'ANTIDIKOS_EPONYMO','ANTIDIKOS_ONOMA','ANTIDIKOS_FULL_NAME'
+      ]},
+      { category: 'Χειριστές δικηγόροι (πολλαπλοί)', vars: [
+        'XEIRISTES_ALL','XEIRISTES_FORMAL',
+        'XEIRISTIS_1_FULL_NAME','XEIRISTIS_1_EPONYMO','XEIRISTIS_1_ONOMA','XEIRISTIS_1_AM','XEIRISTIS_1_SYLLOGOS','XEIRISTIS_1_EMAIL','XEIRISTIS_1_MOBILE','XEIRISTIS_1_AFM',
+        'XEIRISTIS_2_FULL_NAME','XEIRISTIS_2_EPONYMO','XEIRISTIS_2_ONOMA','XEIRISTIS_2_AM','XEIRISTIS_2_SYLLOGOS','XEIRISTIS_2_EMAIL','XEIRISTIS_2_MOBILE','XEIRISTIS_2_AFM',
+        'XEIRISTIS_3_FULL_NAME','XEIRISTIS_3_EPONYMO','XEIRISTIS_3_ONOMA','XEIRISTIS_3_AM','XEIRISTIS_3_SYLLOGOS','XEIRISTIS_3_EMAIL','XEIRISTIS_3_MOBILE','XEIRISTIS_3_AFM',
+        'XEIRISTIS_4_FULL_NAME','XEIRISTIS_5_FULL_NAME'
+      ]},
+      { category: 'Σχετικά πρόσωπα υπόθεσης (πολλαπλά)', vars: [
+        'RELATED_ALL',
+        'RELATED_1_FULL_NAME','RELATED_1_ROLE','RELATED_1_AFM','RELATED_1_DOY','RELATED_1_EMAIL','RELATED_1_DIEYTHYNSI',
+        'RELATED_2_FULL_NAME','RELATED_2_ROLE',
+        'RELATED_3_FULL_NAME','RELATED_3_ROLE',
+        'RELATED_4_FULL_NAME','RELATED_5_FULL_NAME'
       ]},
       { category: 'Γραφείο', vars: [
         'OFFICE_EPONYMIA','OFFICE_DIAKRITIKOS_TITLOS','OFFICE_AFM','OFFICE_DOY',
