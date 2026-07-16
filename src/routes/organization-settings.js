@@ -1,4 +1,4 @@
-// src/routes/organization-settings.js
+﻿// src/routes/organization-settings.js
 // Organization-level settings (issuer data for invoicing, defaults, etc.)
 //
 // Endpoints:
@@ -85,7 +85,7 @@ const ALLOWED_FIELDS = [
   'afm','doy','eponymia','diakritikos_titlos','odos','arithmos','tk','poli','xora',
   'kad','kad_perigrafi','gemi','tilefono','email','web_site','iban','trapeza',
   'default_vat_rate','default_withhold','default_stamp','default_tn','logo_url',
-  'mydata_user_id','mydata_subscription_key','mydata_environment',
+  'mydata_user_id','mydata_subscription_key','mydata_environment','mydata_default_invoice_type','mydata_classification_type','mydata_classification_category',
 ];
 
 router.put('/settings', async (req, res) => {

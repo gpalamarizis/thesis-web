@@ -1,10 +1,10 @@
 # apply-backend.ps1
-# Εφαρμογή myDATA batch στο backend (C:\thesis-web-repo)
+# myDATA integration backend deploy
 #
-# Χρήση:
+# Usage:
 #   cd C:\thesis-web-repo
+#   Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
 #   .\apply-backend.ps1
-# (Το script υποθέτει ότι έχεις κατεβάσει το thesis-mydata.zip στο ~\Downloads και το extractάρεις.)
 
 $ErrorActionPreference = 'Stop'
 $repo = 'C:\thesis-web-repo'
@@ -12,41 +12,34 @@ $repo = 'C:\thesis-web-repo'
 if (-not (Test-Path $repo)) { throw "Repo path $repo not found" }
 Set-Location $repo
 
-# --- 1. Copy new files από ~\Downloads\thesis-mydata\backend\ ---
 $src = "$env:USERPROFILE\Downloads\thesis-mydata\backend"
-if (-not (Test-Path $src)) { throw "Δεν βρήκα $src — extract πρώτα το thesis-mydata.zip στο Downloads." }
+if (-not (Test-Path $src)) { throw "Source dir not found: $src (extract thesis-mydata.zip in Downloads first)" }
 
+# --- 1. Copy new files ---
 Copy-Item "$src\mydata-xml.js"    -Destination "src\utils\mydata-xml.js"    -Force
 Copy-Item "$src\mydata-client.js" -Destination "src\utils\mydata-client.js" -Force
 Copy-Item "$src\mydata.js"        -Destination "src\routes\mydata.js"       -Force
 Write-Host "OK: 3 backend files copied"
 
-# --- 2. Mount /api/mydata στο server.js (αν δεν υπάρχει ήδη) ---
+# --- 2. Mount /api/mydata in server.js ---
 $srvPath = 'src\server.js'
 $srv     = Get-Content $srvPath -Raw -Encoding UTF8
 
 if ($srv -match "require\('./routes/mydata'\)") {
     Write-Host "SKIP: /api/mydata already mounted"
 } else {
-    # Το βάζουμε ακριβώς μετά το invoices mount για συνέπεια
     $needle  = "app.use('/api/invoices',          require('./routes/invoices'));"
     $inject  = "app.use('/api/invoices',          require('./routes/invoices'));`r`napp.use('/api/mydata',            require('./routes/mydata'));"
     if ($srv.Contains($needle)) {
         $srv = $srv.Replace($needle, $inject)
+        Set-Content $srvPath $srv -NoNewline -Encoding UTF8
+        Write-Host "OK: /api/mydata mounted"
     } else {
-        # Fallback: πρόσθεσέ το πριν το 404 handler
-        $marker = "// 404 handler"
-        if ($srv.Contains($marker)) {
-            $srv = $srv.Replace($marker, "app.use('/api/mydata',            require('./routes/mydata'));`r`n`r`n// 404 handler")
-        } else {
-            throw "Δεν βρήκα το σημείο mount στο server.js — mount χειροκίνητα: app.use('/api/mydata', require('./routes/mydata'));"
-        }
+        Write-Warning "server.js mount point not found - add manually: app.use('/api/mydata', require('./routes/mydata'));"
     }
-    Set-Content $srvPath $srv -NoNewline -Encoding UTF8
-    Write-Host "OK: /api/mydata mounted"
 }
 
-# --- 3. Patch organization-settings ALLOWED_FIELDS (για τα defaults invoice type + classifications) ---
+# --- 3. Patch organization-settings ALLOWED_FIELDS ---
 $osPath = 'src\routes\organization-settings.js'
 $os     = Get-Content $osPath -Raw -Encoding UTF8
 
@@ -60,12 +53,12 @@ if ($os.Contains($newLine)) {
     Set-Content $osPath $os -NoNewline -Encoding UTF8
     Write-Host "OK: organization-settings ALLOWED_FIELDS patched"
 } else {
-    Write-Warning "Δεν βρήκα την αναμενόμενη γραμμή στο organization-settings.js — πρόσθεσε manual τα 3 fields στο ALLOWED_FIELDS: mydata_default_invoice_type, mydata_classification_type, mydata_classification_category"
+    Write-Warning "organization-settings.js ALLOWED_FIELDS line not found - add manually"
 }
 
 Write-Host ""
-Write-Host "=== Backend patches εφαρμόστηκαν. Τώρα κάνε commit + push από cmd: ==="
+Write-Host "=== Backend patches applied. Now commit + push from cmd: ==="
 Write-Host "  cd C:\thesis-web-repo"
 Write-Host "  git add -A"
-Write-Host "  git commit -m ""add myDATA integration (sandbox, 1.1 + 2.1, manual send/cancel)"""
+Write-Host "  git commit -m ""add myDATA integration"""
 Write-Host "  git push origin main"

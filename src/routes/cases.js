@@ -1,7 +1,8 @@
-const express = require('express');
+﻿const express = require('express');
 const { pool } = require('../db');
 const { requireAuth } = require('../middleware/auth');
 const { computeProtocolNumber, previewProtocolNumber } = require('../utils/protocol');
+const { ensureColumns } = require('./client-extras');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -149,8 +150,9 @@ router.post('/', async (req, res) => {
          onomasia_fakelou, ekkremis, perilipsi,
          fysiko_prosopo_id, nomiko_prosopo_id,
          thesi, diadikos_id, thesi_arxeiothetisis_id,
-         arithmos_apofasis, dekti, merikos_dekti, aporriptea, old_kod, prosvalomeni
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+         arithmos_apofasis, dekti, merikos_dekti, aporriptea, old_kod, prosvalomeni,
+         gak, eak, arithmos_eisagogikou
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
        RETURNING *`,
       [
         orgId,
@@ -172,6 +174,9 @@ router.post('/', async (req, res) => {
         !!b.aporriptea,
         b.old_kod || null,
         b.prosvalomeni || null,
+        b.gak || null,
+        b.eak || null,
+        b.arithmos_eisagogikou || null,
       ]
     );
     const caseId = insert.rows[0].aa;
@@ -225,8 +230,11 @@ router.put('/:id', async (req, res) => {
          aporriptea              = COALESCE($13, aporriptea),
          old_kod                 = COALESCE($14, old_kod),
          prosvalomeni            = COALESCE($15, prosvalomeni),
+         gak                     = COALESCE($16, gak),
+         eak                     = COALESCE($17, eak),
+         arithmos_eisagogikou    = COALESCE($18, arithmos_eisagogikou),
          updated_at              = NOW()
-       WHERE aa = $16 AND organization_id = $17
+       WHERE aa = $19 AND organization_id = $20
        RETURNING *`,
       [
         b.onomasia_id ?? null,
@@ -244,6 +252,9 @@ router.put('/:id', async (req, res) => {
         typeof b.aporriptea === 'boolean' ? b.aporriptea : null,
         b.old_kod ?? null,
         b.prosvalomeni ?? null,
+        b.gak ?? null,
+        b.eak ?? null,
+        b.arithmos_eisagogikou ?? null,
         id, orgId,
       ]
     );

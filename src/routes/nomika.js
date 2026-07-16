@@ -1,12 +1,18 @@
+// src/routes/nomika.js
+// Νομικά πρόσωπα CRUD.
+// v2: προσθήκη 11 fields (credentials + ιδιοκτησία), encryption για TAXIS/ΔΕΗ/ΓΕΜΗ passwords.
+
 const express = require('express');
 const { pool } = require('../db');
 const { requireAuth } = require('../middleware/auth');
 const { pickAllowed } = require('../utils/query');
+const { ensureColumns, NOMIKA_EXTRA_FIELDS } = require('../routes/client-extras');
+const { transformFields, ENCRYPTED_FIELDS_NOMIKA } = require('../utils/crypto');
 
 const router = express.Router();
 router.use(requireAuth);
 
-const FIELDS = [
+const CORE_FIELDS = [
   'diakritikos_titlos', 'eponymia', 'afm', 'doy', 'gemi',
   'email', 'web_site', 'energos',
   'odos', 'arithmos', 'tk', 'poli', 'xora',
@@ -14,8 +20,10 @@ const FIELDS = [
   'tilefono_kinito_1', 'tilefono_kinito_2', 'tilefono_kinito_3',
   'fax_1', 'fax_2', 'fax_3',
 ];
+const FIELDS = [...CORE_FIELDS, ...NOMIKA_EXTRA_FIELDS];
 
 router.get('/', async (req, res) => {
+  await ensureColumns();
   const orgId = req.user.organization_id;
   const filters = ['organization_id = $1'];
   const params  = [orgId];
@@ -34,25 +42,31 @@ router.get('/', async (req, res) => {
        ORDER BY eponymia LIMIT 500`,
       params
     );
-    res.json({ data: r.rows });
+    // Στη λίστα δεν επιστρέφουμε passwords
+    const rows = r.rows.map(row => ({ ...row, taxis_password: null, dei_password: null, gemi_password: null }));
+    res.json({ data: rows });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 router.get('/:id', async (req, res) => {
+  await ensureColumns();
   try {
     const r = await pool.query(
       `SELECT * FROM nomika_prosopa WHERE aa = $1 AND organization_id = $2`,
       [req.params.id, req.user.organization_id]
     );
     if (r.rows.length === 0) return res.status(404).json({ error: 'Not found' });
-    res.json(r.rows[0]);
+    res.json(transformFields(r.rows[0], ENCRYPTED_FIELDS_NOMIKA, 'decrypt'));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 router.post('/', async (req, res) => {
+  await ensureColumns();
   const orgId = req.user.organization_id;
-  const data = pickAllowed(req.body || {}, FIELDS);
+  let data = pickAllowed(req.body || {}, FIELDS);
   if (!data.eponymia) return res.status(400).json({ error: 'eponymia required' });
+
+  data = transformFields(data, ENCRYPTED_FIELDS_NOMIKA, 'encrypt');
 
   const cols = ['organization_id', ...Object.keys(data)];
   const vals = [orgId, ...Object.values(data)];
@@ -63,17 +77,20 @@ router.post('/', async (req, res) => {
       `INSERT INTO nomika_prosopa (${cols.join(', ')}) VALUES (${ph}) RETURNING *`,
       vals
     );
-    res.status(201).json(r.rows[0]);
+    res.status(201).json(transformFields(r.rows[0], ENCRYPTED_FIELDS_NOMIKA, 'decrypt'));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 router.put('/:id', async (req, res) => {
+  await ensureColumns();
   const orgId = req.user.organization_id;
-  const data = pickAllowed(req.body || {}, FIELDS);
+  let data = pickAllowed(req.body || {}, FIELDS);
   const cols = Object.keys(data);
   if (cols.length === 0) return res.status(400).json({ error: 'no fields to update' });
 
-  const set  = cols.map((c, i) => `${c} = $${i + 1}`).join(', ');
+  data = transformFields(data, ENCRYPTED_FIELDS_NOMIKA, 'encrypt');
+
+  const set  = Object.keys(data).map((c, i) => `${c} = $${i + 1}`).join(', ');
   const vals = [...Object.values(data), req.params.id, orgId];
 
   try {
@@ -84,7 +101,7 @@ router.put('/:id', async (req, res) => {
       vals
     );
     if (r.rows.length === 0) return res.status(404).json({ error: 'Not found' });
-    res.json(r.rows[0]);
+    res.json(transformFields(r.rows[0], ENCRYPTED_FIELDS_NOMIKA, 'decrypt'));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
