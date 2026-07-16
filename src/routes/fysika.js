@@ -47,7 +47,7 @@ router.get('/', async (req, res) => {
       params
     );
     // NOTE: στη λίστα ΔΕΝ επιστρέφουμε passwords για ασφάλεια — τα μηδενίζουμε.
-    const rows = r.rows.map(row => ({ ...row, taxis_password: null, dei_password: null }));
+    const rows = r.rows.map(row => ({ ...row, taxis_password: null, dei_password: null, adt: null }));
     res.json({ data: rows });
   } catch (err) {
     res.status(500).json({ error: err.message });

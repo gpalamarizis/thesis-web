@@ -89,6 +89,6 @@ module.exports = {
   encrypt,
   decrypt,
   transformFields,
-  ENCRYPTED_FIELDS_FYSIKA: ['taxis_password', 'dei_password'],
+  ENCRYPTED_FIELDS_FYSIKA: ['taxis_password', 'dei_password', 'adt'],
   ENCRYPTED_FIELDS_NOMIKA: ['taxis_password', 'dei_password', 'gemi_password'],
 };
