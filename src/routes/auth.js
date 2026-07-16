@@ -93,6 +93,7 @@ router.post('/login', async (req, res) => {
         first_name: user.first_name,
         last_name: user.last_name,
         role: user.role,
+        is_platform_admin: user.is_platform_admin || false,
       },
     });
   } catch (err) {
@@ -106,7 +107,8 @@ router.get('/me', requireAuth, async (req, res) => {
   try {
     const r = await pool.query(
       `SELECT u.id, u.email, u.first_name, u.last_name, u.role,
-              u.organization_id, o.name AS organization_name
+              u.organization_id, o.name AS organization_name,
+              COALESCE(u.is_platform_admin, FALSE) AS is_platform_admin
          FROM users u
          JOIN organizations o ON o.id = u.organization_id
         WHERE u.id = $1`,
