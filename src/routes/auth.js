@@ -1,6 +1,7 @@
 const express = require('express');
 const bcrypt  = require('bcryptjs');
 const { pool } = require('../db');
+const emailSvc = require('../services/email');
 const { signToken, requireAuth } = require('../middleware/auth');
 const { seedNewOrganization } = require('../seed/seedOrg');
 
@@ -62,6 +63,17 @@ router.post('/register', async (req, res) => {
     await seedNewOrganization(client, orgId);
 
     await client.query('COMMIT');
+
+    // Fire welcome email (non-blocking)
+    emailSvc.sendWelcome({
+      to: email,
+      firstName: firstName,
+      organizationName: organizationName,
+    }).then(r => {
+      console.log('[auth] welcome email:', r);
+    }).catch(err => {
+      console.error('[auth] welcome email failed:', err.message);
+    });
 
     const token = signToken(user.rows[0]);
     res.status(201).json({ token, user: user.rows[0], organization: org.rows[0] });
