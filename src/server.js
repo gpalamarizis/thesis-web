@@ -70,6 +70,7 @@ app.use('/api/organization',      require('./routes/organization-settings'));
 app.use('/api/invoice-series',    require('./routes/invoice-series'));
 app.use('/api/invoices',          require('./routes/invoices'));
 app.use('/api/mydata',            require('./routes/mydata'));
+app.use('/api/test-email',        require('./routes/test-email'));
 app.use('/api',                         require('./routes/subscriptions'));
 app.use('/api/case-access',             require('./routes/case-access'));
 app.use('/api/users-admin',             require('./routes/users-admin'));
