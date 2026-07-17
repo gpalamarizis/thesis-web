@@ -9,7 +9,8 @@ const router = express.Router();
 // POST /api/auth/register
 // Δημιουργεί οργάνωση (γραφείο) + admin user + κάνει auto-seed λιστών & δικαστηρίων.
 router.post('/register', async (req, res) => {
-  const { organizationName, email, password, firstName, lastName } = req.body || {};
+  const { organizationName, email, password, firstName, lastName,
+          plan_type, visibility_mode, billing_afm, billing_email, billing_phone } = req.body || {};
 
   if (!organizationName || !email || !password) {
     return res.status(400).json({ error: 'organizationName, email, password required' });
@@ -28,9 +29,23 @@ router.post('/register', async (req, res) => {
       .replace(/^-+|-+$/g, '')
       .slice(0, 60);
 
+    // Default seats per plan type
+    const maxUsersByPlan = { solo: 1, partnership_shared: 5, partnership_private: 5, law_firm: 25 };
+    const maxUsers = maxUsersByPlan[plan_type] || 1;
+    const storageByPlan = { solo: 5120, partnership_shared: 20480, partnership_private: 20480, law_firm: 51200 };
+    const storageMb = storageByPlan[plan_type] || 5120;
+
     const org = await client.query(
-      `INSERT INTO organizations (name, slug) VALUES ($1, $2) RETURNING *`,
-      [organizationName, slug || null]
+      `INSERT INTO organizations (name, slug, plan_type, visibility_mode, max_users, storage_quota_mb,
+                                  subscription_status, trial_ends_at,
+                                  billing_afm, billing_email, billing_phone)
+       VALUES ($1, $2, $3, $4, $5, $6, 'trial', NOW() + INTERVAL '30 days', $7, $8, $9)
+       RETURNING *`,
+      [organizationName, slug || null,
+       plan_type || 'solo',
+       visibility_mode || 'shared',
+       maxUsers, storageMb,
+       billing_afm || null, billing_email || email, billing_phone || null]
     );
     const orgId = org.rows[0].id;
 
@@ -108,7 +123,10 @@ router.get('/me', requireAuth, async (req, res) => {
     const r = await pool.query(
       `SELECT u.id, u.email, u.first_name, u.last_name, u.role,
               u.organization_id, o.name AS organization_name,
-              COALESCE(u.is_platform_admin, FALSE) AS is_platform_admin
+              COALESCE(u.is_platform_admin, FALSE) AS is_platform_admin,
+              COALESCE(u.can_view_finance, FALSE) AS can_view_finance,
+              o.visibility_mode, o.plan_type, o.subscription_status, o.trial_ends_at, o.subscription_ends_at,
+              o.suspended
          FROM users u
          JOIN organizations o ON o.id = u.organization_id
         WHERE u.id = $1`,

@@ -1,6 +1,7 @@
 ﻿const express = require('express');
 const { pool } = require('../db');
 const { requireAuth } = require('../middleware/auth');
+const { buildCaseVisibilityFilter, loadUserContext, isOwner } = require('../middleware/accessControl');
 const { computeProtocolNumber, previewProtocolNumber } = require('../utils/protocol');
 const { ensureColumns } = require('./client-extras');
 
@@ -50,6 +51,10 @@ router.get('/', async (req, res) => {
     filters.push(`y.nomiko_prosopo_id = $${i}`);
     params.push(parseInt(req.query.nomiko_prosopo_id, 10)); i++;
   }
+
+  // Apply case-level visibility filter (skip for owner or shared mode)
+  const vis = await buildCaseVisibilityFilter(req.user, i);
+  if (vis.and) { filters.push(vis.and.replace(/^ AND /, '')); params.push(...vis.params); }
 
   const where = filters.join(' AND ');
   try {
@@ -103,6 +108,16 @@ router.get('/:id', async (req, res) => {
       [req.params.id, req.user.organization_id]
     );
     if (r.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+
+    // Access check για private mode
+    const ctx = await loadUserContext(req.user.sub || req.user.id);
+    if (ctx && !isOwner(ctx) && ctx.visibility_mode === 'private') {
+      const ac = await pool.query(
+        `SELECT 1 FROM case_user_access WHERE ypothesi_id = $1 AND user_id = $2 AND can_view = TRUE LIMIT 1`,
+        [req.params.id, ctx.id]
+      );
+      if (ac.rows.length === 0) return res.status(403).json({ error: 'Δεν έχεις πρόσβαση σε αυτή την υπόθεση' });
+    }
 
     const caseRow = r.rows[0];
 

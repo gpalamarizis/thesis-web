@@ -13,6 +13,8 @@ const { pickAllowed } = require('../utils/query');
 
 const router = express.Router();
 router.use(requireAuth);
+const { requireFinanceAccess } = require('../middleware/accessControl');
+router.use(requireFinanceAccess);
 
 // Ορισμός των 4 finance sub-resources
 const RESOURCES = {
