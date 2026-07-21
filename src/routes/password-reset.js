@@ -141,7 +141,7 @@ router.post('/forgot-password', async (req, res) => {
     const normalizedEmail = email.trim().toLowerCase();
 
     const userQ = await pool.query(
-      `SELECT id, email, COALESCE(full_name, email) AS display_name
+      `SELECT id, email, TRIM(CONCAT(COALESCE(first_name, ''), ' ', COALESCE(last_name, ''))) AS display_name
          FROM users
         WHERE LOWER(email) = $1
         LIMIT 1`,
