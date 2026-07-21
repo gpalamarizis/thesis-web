@@ -153,7 +153,7 @@ router.post('/court/:id/progress', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ---------- Λοιπές ενέργειες (tasks per case) ----------
+// ---------- Λοιπές ενέργειες (tasks per case) - legacy /other endpoints ----------
 
 // GET /api/actions/other?ypothesi_id=..&pending=true
 router.get('/other', async (req, res) => {
@@ -221,16 +221,42 @@ router.delete('/other/:id', async (req, res) => {
     res.json({ deleted: r.rows[0].aa });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
+
 // =============================================================================
-// ADD THIS TO src/routes/actions.js (BACKEND)
-// Paste anywhere after the existing court routes, BEFORE the `module.exports = router;`
+// TASK ROUTES (Λοιπές ενέργειες - energeies table)
+// Multi-dikigoros via energeies_dikigoroi junction → dikigoroi_grafeiou
 // =============================================================================
 
-// ---------- Λοιπές ενέργειες (energeies table) ----------
-
+// Fields that can be updated on the energeies row itself (dikigoroi handled separately)
 const ENERGEIA_FIELDS = [
-  'ypotheseis_id', 'date_dead_line', 'perigrafi_energias', 'ekkremis', 'dikigoros_id'
+  'ypotheseis_id', 'date_dead_line', 'perigrafi_energias', 'ekkremis'
 ];
+
+// Helper: sanitize dikigoroi_ids input to unique array of positive integers
+function normalizeDikigoroiIds(input) {
+  if (!Array.isArray(input)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const v of input) {
+    const n = parseInt(v, 10);
+    if (Number.isInteger(n) && n > 0 && !seen.has(n)) {
+      seen.add(n);
+      out.push(n);
+    }
+  }
+  return out;
+}
+
+// Helper: verify all dikigoroi_ids belong to the org (prevents cross-tenant leakage)
+async function verifyDikigoroiOwnership(client, orgId, ids) {
+  if (ids.length === 0) return true;
+  const r = await client.query(
+    `SELECT COUNT(*)::int AS c FROM dikigoroi_grafeiou
+      WHERE organization_id = $1 AND aa = ANY($2::int[])`,
+    [orgId, ids]
+  );
+  return r.rows[0].c === ids.length;
+}
 
 // GET /api/actions/task?ypothesi_id=..  (accepts both ypothesi_id and ypotheseis_id)
 router.get('/task', async (req, res) => {
@@ -253,10 +279,23 @@ router.get('/task', async (req, res) => {
     const r = await pool.query(
       `SELECT e.*,
               y.xeirokinito_id,
-              CONCAT_WS(' ', u.first_name, u.last_name) AS dikigoros_name
+              COALESCE(
+                (SELECT json_agg(
+                          json_build_object(
+                            'id',       d.aa,
+                            'onoma',    d.onoma,
+                            'eponymo',  d.eponymo,
+                            'fullname', TRIM(CONCAT_WS(' ', d.eponymo, d.onoma))
+                          )
+                          ORDER BY d.eponymo, d.onoma
+                        )
+                   FROM energeies_dikigoroi ed
+                   JOIN dikigoroi_grafeiou  d ON d.aa = ed.dikigoroi_grafeiou_id
+                  WHERE ed.energeia_id = e.aa),
+                '[]'::json
+              ) AS dikigoroi
          FROM energeies e
          LEFT JOIN ypotheseis y ON y.aa = e.ypotheseis_id
-         LEFT JOIN users u ON u.id = e.dikigoros_id
         WHERE ${filters.join(' AND ')}
         ORDER BY e.date_dead_line ASC NULLS LAST LIMIT 500`,
       params
@@ -275,30 +314,88 @@ router.post('/task', async (req, res) => {
   const ypId = body.ypothesi_id || body.ypotheseis_id;
   if (!ypId) return res.status(400).json({ error: 'ypothesi_id required' });
 
+  const dikigoroiIds = normalizeDikigoroiIds(body.dikigoroi_ids);
+
+  const client = await pool.connect();
   try {
-    // verify case belongs to org
-    const check = await pool.query(
+    await client.query('BEGIN');
+
+    // Verify case belongs to org
+    const check = await client.query(
       'SELECT aa FROM ypotheseis WHERE aa = $1 AND organization_id = $2',
       [parseInt(ypId, 10), orgId]
     );
-    if (check.rows.length === 0) return res.status(404).json({ error: 'Case not found' });
+    if (check.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Case not found' });
+    }
 
-    const r = await pool.query(
-      `INSERT INTO energeies (ypotheseis_id, date_dead_line, perigrafi_energias, ekkremis, dikigoros_id)
+    // Verify all dikigoroi belong to this org (prevent cross-tenant assignment)
+    const owns = await verifyDikigoroiOwnership(client, orgId, dikigoroiIds);
+    if (!owns) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Invalid dikigoros reference' });
+    }
+
+    // Insert the energeia row
+    const ins = await client.query(
+      `INSERT INTO energeies (organization_id, ypotheseis_id, perigrafi_energias, date_dead_line, ekkremis)
        VALUES ($1, $2, $3, $4, $5)
-       RETURNING *`,
+       RETURNING aa`,
       [
+        orgId,
         parseInt(ypId, 10),
-        body.date_dead_line || null,
         body.perigrafi_energias || null,
+        body.date_dead_line || null,
         body.ekkremis !== false,
-        body.dikigoros_id ? parseInt(body.dikigoros_id, 10) : null,
       ]
     );
-    res.status(201).json({ data: r.rows[0] });
+    const energeiaId = ins.rows[0].aa;
+
+    // Insert junction rows (if any)
+    if (dikigoroiIds.length > 0) {
+      const values = dikigoroiIds
+        .map((_, idx) => `($1, $2, $${idx + 3})`)
+        .join(', ');
+      await client.query(
+        `INSERT INTO energeies_dikigoroi (organization_id, energeia_id, dikigoroi_grafeiou_id)
+         VALUES ${values}
+         ON CONFLICT (energeia_id, dikigoroi_grafeiou_id) DO NOTHING`,
+        [orgId, energeiaId, ...dikigoroiIds]
+      );
+    }
+
+    await client.query('COMMIT');
+
+    // Fetch the full row with aggregated dikigoroi
+    const full = await pool.query(
+      `SELECT e.*,
+              COALESCE(
+                (SELECT json_agg(
+                          json_build_object(
+                            'id',       d.aa,
+                            'onoma',    d.onoma,
+                            'eponymo',  d.eponymo,
+                            'fullname', TRIM(CONCAT_WS(' ', d.eponymo, d.onoma))
+                          )
+                          ORDER BY d.eponymo, d.onoma
+                        )
+                   FROM energeies_dikigoroi ed
+                   JOIN dikigoroi_grafeiou  d ON d.aa = ed.dikigoroi_grafeiou_id
+                  WHERE ed.energeia_id = e.aa),
+                '[]'::json
+              ) AS dikigoroi
+         FROM energeies e
+        WHERE e.aa = $1`,
+      [energeiaId]
+    );
+    res.status(201).json({ data: full.rows[0] });
   } catch (err) {
+    try { await client.query('ROLLBACK'); } catch {}
     console.error('[actions/task create]', err);
     res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
   }
 });
 
@@ -306,37 +403,112 @@ router.post('/task', async (req, res) => {
 router.put('/task/:id', async (req, res) => {
   const orgId = req.user.organization_id;
   const body = req.body || {};
+  const taskId = parseInt(req.params.id, 10);
+  if (!Number.isInteger(taskId)) return res.status(400).json({ error: 'Invalid id' });
+
+  const client = await pool.connect();
   try {
+    await client.query('BEGIN');
+
     // Verify ownership via join
-    const own = await pool.query(
+    const own = await client.query(
       `SELECT e.aa FROM energeies e
          JOIN ypotheseis y ON y.aa = e.ypotheseis_id
         WHERE e.aa = $1 AND y.organization_id = $2`,
-      [req.params.id, orgId]
+      [taskId, orgId]
     );
-    if (own.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+    if (own.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Not found' });
+    }
 
+    // Update scalar fields on energeies (only those provided)
     const fields = [];
     const params = [];
     let i = 1;
-    if (body.date_dead_line !== undefined)     { fields.push(`date_dead_line = $${i++}`);     params.push(body.date_dead_line); }
-    if (body.perigrafi_energias !== undefined) { fields.push(`perigrafi_energias = $${i++}`); params.push(body.perigrafi_energias); }
-    if (body.ekkremis !== undefined)           { fields.push(`ekkremis = $${i++}`);           params.push(!!body.ekkremis); }
-    if (body.dikigoros_id !== undefined)       { fields.push(`dikigoros_id = $${i++}`);       params.push(body.dikigoros_id ? parseInt(body.dikigoros_id, 10) : null); }
-    if (fields.length === 0) return res.status(400).json({ error: 'No changes' });
-    params.push(req.params.id);
-    const r = await pool.query(
-      `UPDATE energeies SET ${fields.join(', ')} WHERE aa = $${i} RETURNING *`,
-      params
+    if (body.date_dead_line !== undefined) {
+      fields.push(`date_dead_line = $${i++}`);
+      params.push(body.date_dead_line || null);
+    }
+    if (body.perigrafi_energias !== undefined) {
+      fields.push(`perigrafi_energias = $${i++}`);
+      params.push(body.perigrafi_energias || null);
+    }
+    if (body.ekkremis !== undefined) {
+      fields.push(`ekkremis = $${i++}`);
+      params.push(!!body.ekkremis);
+    }
+
+    if (fields.length > 0) {
+      params.push(taskId);
+      await client.query(
+        `UPDATE energeies SET ${fields.join(', ')} WHERE aa = $${i}`,
+        params
+      );
+    }
+
+    // Sync dikigoroi if the field was provided (empty array = clear all)
+    if (body.dikigoroi_ids !== undefined) {
+      const dikigoroiIds = normalizeDikigoroiIds(body.dikigoroi_ids);
+      const owns = await verifyDikigoroiOwnership(client, orgId, dikigoroiIds);
+      if (!owns) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Invalid dikigoros reference' });
+      }
+      // Clear existing
+      await client.query(
+        'DELETE FROM energeies_dikigoroi WHERE energeia_id = $1',
+        [taskId]
+      );
+      // Insert new (if any)
+      if (dikigoroiIds.length > 0) {
+        const values = dikigoroiIds
+          .map((_, idx) => `($1, $2, $${idx + 3})`)
+          .join(', ');
+        await client.query(
+          `INSERT INTO energeies_dikigoroi (organization_id, energeia_id, dikigoroi_grafeiou_id)
+           VALUES ${values}
+           ON CONFLICT (energeia_id, dikigoroi_grafeiou_id) DO NOTHING`,
+          [orgId, taskId, ...dikigoroiIds]
+        );
+      }
+    }
+
+    await client.query('COMMIT');
+
+    // Return updated row with aggregated dikigoroi
+    const full = await pool.query(
+      `SELECT e.*,
+              COALESCE(
+                (SELECT json_agg(
+                          json_build_object(
+                            'id',       d.aa,
+                            'onoma',    d.onoma,
+                            'eponymo',  d.eponymo,
+                            'fullname', TRIM(CONCAT_WS(' ', d.eponymo, d.onoma))
+                          )
+                          ORDER BY d.eponymo, d.onoma
+                        )
+                   FROM energeies_dikigoroi ed
+                   JOIN dikigoroi_grafeiou  d ON d.aa = ed.dikigoroi_grafeiou_id
+                  WHERE ed.energeia_id = e.aa),
+                '[]'::json
+              ) AS dikigoroi
+         FROM energeies e
+        WHERE e.aa = $1`,
+      [taskId]
     );
-    res.json({ data: r.rows[0] });
+    res.json({ data: full.rows[0] });
   } catch (err) {
+    try { await client.query('ROLLBACK'); } catch {}
     console.error('[actions/task update]', err);
     res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
   }
 });
 
-// DELETE /api/actions/task/:id
+// DELETE /api/actions/task/:id  (junction rows cascade automatically)
 router.delete('/task/:id', async (req, res) => {
   const orgId = req.user.organization_id;
   try {
