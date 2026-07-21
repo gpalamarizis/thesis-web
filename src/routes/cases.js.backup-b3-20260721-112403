@@ -1,4 +1,4 @@
-const express = require('express');
+﻿const express = require('express');
 const { pool } = require('../db');
 const { requireAuth } = require('../middleware/auth');
 const { buildCaseVisibilityFilter, loadUserContext, isOwner } = require('../middleware/accessControl');
@@ -248,10 +248,8 @@ router.put('/:id', async (req, res) => {
          gak                     = COALESCE($16, gak),
          eak                     = COALESCE($17, eak),
          arithmos_eisagogikou    = COALESCE($18, arithmos_eisagogikou),
-         fysiko_prosopo_id       = COALESCE($19, fysiko_prosopo_id),
-         nomiko_prosopo_id       = COALESCE($20, nomiko_prosopo_id),
          updated_at              = NOW()
-       WHERE aa = $21 AND organization_id = $22
+       WHERE aa = $19 AND organization_id = $20
        RETURNING *`,
       [
         b.onomasia_id ?? null,
@@ -272,8 +270,6 @@ router.put('/:id', async (req, res) => {
         b.gak ?? null,
         b.eak ?? null,
         b.arithmos_eisagogikou ?? null,
-        b.fysiko_prosopo_id ?? null,
-        b.nomiko_prosopo_id ?? null,
         id, orgId,
       ]
     );
@@ -532,5 +528,3 @@ router.post('/:id/suggestions/feedback', async (req, res) => {
 });
 
 module.exports = router;
-
-
