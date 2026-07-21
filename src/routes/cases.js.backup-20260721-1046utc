@@ -26,40 +26,6 @@ router.get('/preview-protocol', async (req, res) => {
   }
 });
 
-// GET /api/cases/by-client?type=fysiko|nomiko&id=X
-// Returns all cases of a specific client. Used by CaseNew sidebar
-// (before a case exists, so cannot use /:id/same-client).
-router.get('/by-client', async (req, res) => {
-  const orgId = req.user.organization_id;
-  const { type, id } = req.query;
-  if (!type || !id) return res.status(400).json({ error: 'type + id required' });
-  if (!['fysiko', 'nomiko'].includes(type)) return res.status(400).json({ error: 'type must be fysiko|nomiko' });
-
-  const clientId = parseInt(id, 10);
-  if (!Number.isInteger(clientId) || clientId <= 0) return res.status(400).json({ error: 'invalid id' });
-
-  const clientCol = type === 'fysiko' ? 'fysiko_prosopo_id' : 'nomiko_prosopo_id';
-
-  try {
-    const r = await pool.query(
-      `SELECT y.aa, y.xeirokinito_id, y.perilipsi, y.date_eisagogis, y.date_telous, y.ekkremis,
-              y.onomasia_fakelou,
-              yo.name AS onomasia_name
-         FROM ypotheseis y
-    LEFT JOIN ypotheseis_onomasies yo ON yo.aa = y.onomasia_id
-        WHERE y.organization_id = $1
-          AND y.${clientCol} = $2
-        ORDER BY y.date_eisagogis DESC NULLS LAST, y.aa DESC
-        LIMIT 100`,
-      [orgId, clientId]
-    );
-    res.json({ data: r.rows });
-  } catch (err) {
-    console.error('[cases/by-client]', err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
 // GET /api/cases?ekkremis=true&q=...&page=1&pageSize=20
 router.get('/', async (req, res) => {
   const orgId = req.user.organization_id;
@@ -354,6 +320,10 @@ router.delete('/:id', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+// =============================================================================
+// ADD THIS TO src/routes/cases.js (BACKEND)
+// Paste anywhere before the `module.exports = router;` at the end
+// =============================================================================
 
 // GET /api/cases/:id/same-client  →  other cases of the same client (fysiko or nomiko)
 router.get('/:id/same-client', async (req, res) => {
@@ -398,6 +368,12 @@ router.get('/:id/same-client', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+// =============================================================================
+// ADD THIS TO src/routes/cases.js (BACKEND)
+// Paste anywhere before the `module.exports = router;` at the end.
+//
+// Requires pg_trgm extension. Auto-enabled on first call.
+// =============================================================================
 
 let suggestionsInitialized = false;
 async function ensureSuggestionsSchema() {
@@ -556,3 +532,5 @@ router.post('/:id/suggestions/feedback', async (req, res) => {
 });
 
 module.exports = router;
+
+

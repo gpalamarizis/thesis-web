@@ -1,30 +1,33 @@
 ﻿{
-  "name": "thesis-web",
-  "version": "3.0.0",
-  "description": "Thesis - Legal Case Management (v3, multi-tenant with full VB.NET parity)",
-  "main": "src/server.js",
-  "type": "commonjs",
-  "scripts": {
-    "start": "node src/server.js",
-    "migrate": "node scripts/migrate.js",
-    "dev": "node src/server.js"
-  },
-  "dependencies": {
-    "@aws-sdk/client-s3": "^3.617.0",
-    "@aws-sdk/s3-request-presigner": "^3.617.0",
-    "bcryptjs": "^2.4.3",
-    "cors": "^2.8.5",
-    "docxtemplater": "^3.69.0",
-    "nodemailer": "^6.9.0",
-    "dotenv": "^16.4.5",
-    "express": "^4.19.2",
-    "helmet": "^7.1.0",
-    "jsonwebtoken": "^9.0.2",
-    "multer": "^1.4.5-lts.1",
-    "pg": "^8.12.0",
-    "pizzip": "^3.2.0"
-  },
-  "engines": {
-    "node": ">=18"
-  }
+    "name":  "thesis-web",
+    "version":  "3.0.0",
+    "description":  "Thesis - Legal Case Management (v3, multi-tenant with full VB.NET parity)",
+    "main":  "src/server.js",
+    "type":  "commonjs",
+    "scripts":  {
+                    "start":  "node src/server.js",
+                    "migrate":  "node scripts/migrate.js",
+                    "dev":  "node src/server.js",
+                    "migrate:up":  "node scripts/migrate-v2.js",
+                    "migrate:status":  "node scripts/migrate-v2.js --status",
+                    "migrate:baseline":  "node scripts/migrate-v2.js --baseline"
+                },
+    "dependencies":  {
+                         "@aws-sdk/client-s3":  "^3.617.0",
+                         "@aws-sdk/s3-request-presigner":  "^3.617.0",
+                         "bcryptjs":  "^2.4.3",
+                         "cors":  "^2.8.5",
+                         "docxtemplater":  "^3.69.0",
+                         "nodemailer":  "^6.9.0",
+                         "dotenv":  "^16.4.5",
+                         "express":  "^4.19.2",
+                         "helmet":  "^7.1.0",
+                         "jsonwebtoken":  "^9.0.2",
+                         "multer":  "^1.4.5-lts.1",
+                         "pg":  "^8.12.0",
+                         "pizzip":  "^3.2.0"
+                     },
+    "engines":  {
+                    "node":  "\u003e=18"
+                }
 }
