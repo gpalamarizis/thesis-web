@@ -78,6 +78,7 @@ app.use('/api/reports/courts-report',   require('./routes/courts-report'));
 app.use('/api/gdpr',                    require('./routes/gdpr'));
 app.use('/api/cron',                    require('./routes/cron'));
 app.use('/api/cron',                    require('./routes/renewal-reminders'));
+app.use('/api/admin',                   require('./routes/schema-inspect'));
 app.use('/api/platform',          require('./routes/platform'));
 app.use('/api/document-templates', require('./routes/document-templates'));
 app.use('/api/court-sub-actions', require('./routes/court-sub-actions'));
