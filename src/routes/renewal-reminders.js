@@ -21,7 +21,9 @@ const MAIL_FROM = process.env.MAIL_FROM || 'gpal@oban.gr';
 
 function authorize(req, res, next) {
   const authHeader = req.headers.authorization || '';
-  const provided = authHeader.replace(/^Bearer\s+/i, '');
+  const bearerToken = authHeader.replace(/^Bearer\s+/i, '');
+  const cronKey = req.headers['x-cron-key'] || '';
+  const provided = cronKey || bearerToken;
   if (!provided || provided !== process.env.CRON_SECRET) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
