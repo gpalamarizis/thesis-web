@@ -235,8 +235,7 @@ router.post('/reset-password', async (req, res) => {
       `UPDATE users
           SET password_hash = $1,
               password_reset_token = NULL,
-              password_reset_expires_at = NULL,
-              updated_at = NOW()
+              password_reset_expires_at = NULL
         WHERE id = $2`,
       [hash, userId]
     );
