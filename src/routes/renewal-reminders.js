@@ -134,7 +134,7 @@ async function handleRenewalReminders(req, res) {
   const daysParam = req.query.days || '30,7,0';
   const daysList = daysParam.split(',')
     .map(s => parseInt(String(s).trim(), 10))
-    .filter(n => !isNaN(n) && n >= 0 && n <= 365);
+    .filter(n => !isNaN(n) && n >= 0 && n <= 730);
 
   if (daysList.length === 0) {
     return res.status(400).json({ error: 'Invalid days parameter' });
