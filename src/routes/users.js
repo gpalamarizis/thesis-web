@@ -1,4 +1,4 @@
-// Users CRUD for the currently authenticated user's organization.
+﻿// Users CRUD for the currently authenticated user's organization.
 // - Multi-tenant: all queries scoped by req.user.organization_id
 // - Password hashing via bcryptjs/bcrypt (whichever is installed)
 // - Only admins can create/edit/delete other users
@@ -72,7 +72,7 @@ router.post('/', async (req, res) => {
   if (password.length < 8) {
     return res.status(400).json({ error: 'Ο κωδικός πρέπει να είναι τουλάχιστον 8 χαρακτήρες' });
   }
-  const finalRole = ['admin', 'lawyer', 'secretary'].includes(role) ? role : 'lawyer';
+  const finalRole = ['admin', 'owner', 'lawyer', 'secretary', 'trainee'].includes(role) ? role : 'lawyer';
   try {
     // Email uniqueness — globally, since email is the login identifier
     const dup = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
@@ -126,7 +126,7 @@ router.put('/:id', async (req, res) => {
 
     // Only admins can change role or is_active
     if (role !== undefined && isAdmin(req)) {
-      const finalRole = ['admin', 'lawyer', 'secretary'].includes(role) ? role : currentRole;
+      const finalRole = ['admin', 'owner', 'lawyer', 'secretary', 'trainee'].includes(role) ? role : currentRole;
       // Safety: prevent demoting the last admin
       if (currentRole === 'admin' && finalRole !== 'admin') {
         const adminCount = await pool.query(
