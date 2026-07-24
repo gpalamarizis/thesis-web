@@ -532,4 +532,233 @@ router.post('/admins/revoke', async (req, res) => {
   }
 });
 
+// ============================================================
+// EXTENDED: Create/Delete orgs + full user management
+// Added 2026-07-24
+// ============================================================
+
+// POST /api/platform/organizations
+// Create a new organization + first admin user (offline signup)
+router.post('/organizations', async (req, res) => {
+  const {
+    name, slug, plan_type = 'enterprise',
+    admin_email, admin_password, admin_first_name = 'Admin', admin_last_name = '',
+    subscription_start,        // ISO date, defaults to now
+    subscription_years = 1,
+    billing_email, billing_afm, billing_phone, notes,
+    max_users = 20, storage_quota_mb = 50000
+  } = req.body;
+
+  if (!name || !slug || !admin_email || !admin_password) {
+    return res.status(400).json({ error: 'Required: name, slug, admin_email, admin_password' });
+  }
+  if (admin_password.length < 8) {
+    return res.status(400).json({ error: 'Password min 8 characters' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const startDate = subscription_start ? new Date(subscription_start) : new Date();
+    const endDate = new Date(startDate);
+    endDate.setFullYear(endDate.getFullYear() + Number(subscription_years));
+
+    const orgResult = await client.query(`
+      INSERT INTO organizations (
+        name, slug, plan_type, subscription_status,
+        trial_ends_at, subscription_ends_at,
+        max_users, storage_quota_mb,
+        billing_email, billing_afm, billing_phone, notes
+      ) VALUES ($1, $2, $3, 'active', NULL, $4, $5, $6, $7, $8, $9, $10)
+      RETURNING *
+    `, [
+      name, slug, plan_type, endDate.toISOString(),
+      max_users, storage_quota_mb,
+      billing_email || null, billing_afm || null, billing_phone || null, notes || null
+    ]);
+    const org = orgResult.rows[0];
+
+    const hash = await bcrypt.hash(admin_password, 10);
+    const userResult = await client.query(`
+      INSERT INTO users (organization_id, email, password_hash, first_name, last_name, role, is_active)
+      VALUES ($1, $2, $3, $4, $5, 'admin', true)
+      RETURNING id, email, first_name, last_name
+    `, [org.id, admin_email, hash, admin_first_name, admin_last_name]);
+
+    await client.query('COMMIT');
+    await logAction(req.user.sub || req.user.id, req.user.email, 'create_organization', 'organization', org.id, { name, slug });
+    res.status(201).json({ data: { organization: org, admin_user: userResult.rows[0] } });
+
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[platform/orgs create]', err);
+    if (err.code === '23505') return res.status(409).json({ error: 'Slug or email already exists' });
+    res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
+  }
+});
+
+// POST /api/platform/organizations/:id/extend
+// Extend subscription by N years (default 1)
+router.post('/organizations/:id/extend', async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const { years = 1 } = req.body || {};
+  try {
+    const { rows: [org] } = await pool.query(
+      `UPDATE organizations
+       SET subscription_ends_at = COALESCE(subscription_ends_at, NOW()) + (INTERVAL '1 year' * $1),
+           subscription_status = 'active',
+           suspended = false,
+           suspended_reason = NULL
+       WHERE id = $2
+       RETURNING id, name, subscription_ends_at`,
+      [years, id]
+    );
+    if (!org) return res.status(404).json({ error: 'Not found' });
+    await logAction(req.user.sub || req.user.id, req.user.email, 'extend_subscription', 'organization', id, { years });
+    res.json({ data: org });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/platform/organizations/:id
+// HARD delete - requires confirmation token in body
+router.delete('/organizations/:id', async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const { confirm } = req.body || {};
+  if (confirm !== `DELETE-${id}`) {
+    return res.status(400).json({
+      error: `Body must include { "confirm": "DELETE-${id}" }`
+    });
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(`DELETE FROM users WHERE organization_id = $1`, [id]);
+    const { rowCount } = await client.query(`DELETE FROM organizations WHERE id = $1`, [id]);
+    if (rowCount === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Not found' });
+    }
+    await client.query('COMMIT');
+    await logAction(req.user.sub || req.user.id, req.user.email, 'delete_organization', 'organization', id, {});
+    res.json({ deleted: true });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[platform/orgs delete]', err);
+    res.status(500).json({
+      error: err.message + ' (Org has references. Suspend instead.)'
+    });
+  } finally {
+    client.release();
+  }
+});
+
+// GET /api/platform/organizations/:id/users
+router.get('/organizations/:id/users', async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  try {
+    const { rows } = await pool.query(`
+      SELECT id, email, first_name, last_name, role, is_active,
+             is_platform_admin, can_view_finance, created_at
+      FROM users WHERE organization_id = $1
+      ORDER BY is_platform_admin DESC, id
+    `, [id]);
+    res.json({ data: rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/platform/organizations/:id/users
+router.post('/organizations/:id/users', async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const {
+    email, password, first_name, last_name,
+    role = 'lawyer', is_active = true, can_view_finance = false
+  } = req.body || {};
+  if (!email || !password) return res.status(400).json({ error: 'email + password required' });
+  if (password.length < 8) return res.status(400).json({ error: 'Password min 8 chars' });
+
+  try {
+    const hash = await bcrypt.hash(password, 10);
+    const { rows: [user] } = await pool.query(`
+      INSERT INTO users (
+        organization_id, email, password_hash, first_name, last_name,
+        role, is_active, can_view_finance
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      RETURNING id, email, first_name, last_name, role, is_active
+    `, [id, email, hash, first_name, last_name, role, is_active, can_view_finance]);
+    await logAction(req.user.sub || req.user.id, req.user.email, 'create_user', 'user', user.id, { org_id: id, email });
+    res.status(201).json({ data: user });
+  } catch (err) {
+    if (err.code === '23505') return res.status(409).json({ error: 'Email already exists' });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PATCH /api/platform/users/:id
+router.patch('/users/:id', async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const allowedFields = ['email', 'first_name', 'last_name', 'role', 'is_active', 'can_view_finance'];
+  const sets = [], values = [];
+  let idx = 1;
+  for (const key of allowedFields) {
+    if (req.body[key] !== undefined) {
+      sets.push(`${key} = $${idx++}`);
+      values.push(req.body[key]);
+    }
+  }
+  if (req.body.password) {
+    if (req.body.password.length < 8) return res.status(400).json({ error: 'Password min 8 chars' });
+    const hash = await bcrypt.hash(req.body.password, 10);
+    sets.push(`password_hash = $${idx++}`);
+    values.push(hash);
+  }
+  if (sets.length === 0) return res.status(400).json({ error: 'No fields to update' });
+  sets.push(`updated_at = NOW()`);
+  values.push(id);
+  try {
+    const { rows: [user] } = await pool.query(
+      `UPDATE users SET ${sets.join(', ')} WHERE id = $${idx} RETURNING id, email, role, is_active`,
+      values
+    );
+    if (!user) return res.status(404).json({ error: 'Not found' });
+    await logAction(req.user.sub || req.user.id, req.user.email, 'update_user', 'user', id, req.body);
+    res.json({ data: user });
+  } catch (err) {
+    if (err.code === '23505') return res.status(409).json({ error: 'Email already exists' });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/platform/users/:id
+router.delete('/users/:id', async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const currentUserId = req.user.sub || req.user.id;
+  if (String(id) === String(currentUserId)) {
+    return res.status(400).json({ error: 'Cannot delete yourself' });
+  }
+  try {
+    const { rowCount } = await pool.query(`DELETE FROM users WHERE id = $1`, [id]);
+    if (rowCount === 0) return res.status(404).json({ error: 'Not found' });
+    await logAction(currentUserId, req.user.email, 'delete_user', 'user', id, {});
+    res.json({ deleted: true });
+  } catch (err) {
+    try {
+      await pool.query(
+        `UPDATE users SET is_active = false, email = 'deleted-' || id || '@thesis.local' WHERE id = $1`,
+        [id]
+      );
+      await logAction(currentUserId, req.user.email, 'deactivate_user', 'user', id, { reason: 'FK conflict' });
+      res.json({ deactivated: true, reason: 'has references, deactivated instead' });
+    } catch (err2) {
+      res.status(500).json({ error: err2.message });
+    }
+  }
+});
+
 module.exports = router;
