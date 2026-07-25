@@ -1,4 +1,4 @@
-FROM node:20-alpine
+FROM node:22-alpine
 
 WORKDIR /app
 
@@ -14,5 +14,4 @@ ENV NODE_ENV=production
 EXPOSE 3000
 
 # Χρήση του σωστού entry point (src/server.js).
-# Το v2 είχε πάθει bug με λάθος path εδώ - προσοχή.
 CMD ["node", "src/server.js"]
