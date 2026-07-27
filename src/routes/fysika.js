@@ -25,7 +25,12 @@ const CORE_FIELDS = [
 ];
 const FIELDS = [...CORE_FIELDS, ...FYSIKA_EXTRA_FIELDS];
 
-// GET /api/fysika?q=&energos=true|false
+// GET /api/fysika?q=&energos=true|false&limit=&slim=1
+// v3 FIX: το LIMIT 500 έκοβε τη λίστα αλφαβητικά γύρω στο "Β".
+//         Νέο default 10000, ρυθμιζόμενο με ?limit=. Επιστρέφεται και total
+//         ώστε ο client να καταλαβαίνει αν κόπηκε κάτι.
+// v3 FIX: αναζήτηση και σε "Επώνυμο Όνομα" / "Όνομα Επώνυμο" ως ενιαίο string.
+// v3 NEW: ?slim=1 επιστρέφει μόνο aa/eponymo/onoma/afm/energos για dropdowns.
 router.get('/', async (req, res) => {
   await ensureColumns();
   const orgId = req.user.organization_id;
@@ -34,21 +39,37 @@ router.get('/', async (req, res) => {
   let i = 2;
 
   if (req.query.q) {
-    filters.push(`(eponymo ILIKE $${i} OR onoma ILIKE $${i} OR afm ILIKE $${i})`);
-    params.push(`%${req.query.q}%`); i++;
+    filters.push(`(
+      eponymo ILIKE $${i}
+      OR onoma ILIKE $${i}
+      OR afm ILIKE $${i}
+      OR (COALESCE(eponymo,'') || ' ' || COALESCE(onoma,'')) ILIKE $${i}
+      OR (COALESCE(onoma,'') || ' ' || COALESCE(eponymo,'')) ILIKE $${i}
+    )`);
+    params.push(`%${String(req.query.q).trim()}%`); i++;
   }
   if (req.query.energos === 'true')  filters.push('energos = TRUE');
   if (req.query.energos === 'false') filters.push('energos = FALSE');
 
+  const where = filters.join(' AND ');
+  const limit = Math.min(50000, Math.max(1, parseInt(req.query.limit || '10000', 10)));
+  const slim  = req.query.slim === '1';
+  const cols  = slim ? 'aa, eponymo, onoma, afm, energos' : '*';
+
   try {
+    const countR = await pool.query(
+      `SELECT COUNT(*)::int AS c FROM fysika_prosopa WHERE ${where}`, params
+    );
     const r = await pool.query(
-      `SELECT * FROM fysika_prosopa WHERE ${filters.join(' AND ')}
-       ORDER BY eponymo, onoma LIMIT 500`,
+      `SELECT ${cols} FROM fysika_prosopa WHERE ${where}
+       ORDER BY eponymo, onoma LIMIT ${limit}`,
       params
     );
     // NOTE: στη λίστα ΔΕΝ επιστρέφουμε passwords για ασφάλεια — τα μηδενίζουμε.
-    const rows = r.rows.map(row => ({ ...row, taxis_password: null, dei_password: null, adt: null }));
-    res.json({ data: rows });
+    const rows = slim
+      ? r.rows
+      : r.rows.map(row => ({ ...row, taxis_password: null, dei_password: null, adt: null }));
+    res.json({ data: rows, total: countR.rows[0].c, returned: rows.length, limit });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

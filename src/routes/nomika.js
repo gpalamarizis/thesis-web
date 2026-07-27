@@ -22,6 +22,10 @@ const CORE_FIELDS = [
 ];
 const FIELDS = [...CORE_FIELDS, ...NOMIKA_EXTRA_FIELDS];
 
+// GET /api/nomika?q=&energos=true|false&limit=&slim=1
+// v3 FIX: το LIMIT 500 έκοβε τη λίστα αλφαβητικά. Νέο default 10000, ?limit= ρυθμιζόμενο.
+// v3 FIX: αναζήτηση και σε ΓΕΜΗ.
+// v3 NEW: ?slim=1 για dropdowns.
 router.get('/', async (req, res) => {
   await ensureColumns();
   const orgId = req.user.organization_id;
@@ -30,21 +34,36 @@ router.get('/', async (req, res) => {
   let i = 2;
 
   if (req.query.q) {
-    filters.push(`(eponymia ILIKE $${i} OR diakritikos_titlos ILIKE $${i} OR afm ILIKE $${i})`);
-    params.push(`%${req.query.q}%`); i++;
+    filters.push(`(
+      eponymia ILIKE $${i}
+      OR diakritikos_titlos ILIKE $${i}
+      OR afm ILIKE $${i}
+      OR gemi ILIKE $${i}
+    )`);
+    params.push(`%${String(req.query.q).trim()}%`); i++;
   }
   if (req.query.energos === 'true')  filters.push('energos = TRUE');
   if (req.query.energos === 'false') filters.push('energos = FALSE');
 
+  const where = filters.join(' AND ');
+  const limit = Math.min(50000, Math.max(1, parseInt(req.query.limit || '10000', 10)));
+  const slim  = req.query.slim === '1';
+  const cols  = slim ? 'aa, eponymia, diakritikos_titlos, afm, energos' : '*';
+
   try {
+    const countR = await pool.query(
+      `SELECT COUNT(*)::int AS c FROM nomika_prosopa WHERE ${where}`, params
+    );
     const r = await pool.query(
-      `SELECT * FROM nomika_prosopa WHERE ${filters.join(' AND ')}
-       ORDER BY eponymia LIMIT 500`,
+      `SELECT ${cols} FROM nomika_prosopa WHERE ${where}
+       ORDER BY eponymia LIMIT ${limit}`,
       params
     );
     // Στη λίστα δεν επιστρέφουμε passwords
-    const rows = r.rows.map(row => ({ ...row, taxis_password: null, dei_password: null, gemi_password: null }));
-    res.json({ data: rows });
+    const rows = slim
+      ? r.rows
+      : r.rows.map(row => ({ ...row, taxis_password: null, dei_password: null, gemi_password: null }));
+    res.json({ data: rows, total: countR.rows[0].c, returned: rows.length, limit });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
