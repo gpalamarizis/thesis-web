@@ -6,8 +6,47 @@
 const express = require('express');
 const { pool } = require('../db');
 const { requireAuth } = require('../middleware/auth');
+const { buildReportDocx, sendDocx } = require('../utils/docxReport');
 
 const router = express.Router();
+
+// --- Word export helpers ---------------------------------------------------
+
+// Επιστρέφει το όνομα του γραφείου για την επικεφαλίδα. Αν αποτύχει, κενό.
+async function orgName(orgId) {
+  for (const pk of ['id', 'aa']) {
+    try {
+      const r = await pool.query(`SELECT * FROM organizations WHERE ${pk} = $1 LIMIT 1`, [orgId]);
+      if (r.rows.length) {
+        const o = r.rows[0];
+        return o.name || o.eponymia || o.epwnymia || o.title || '';
+      }
+      return '';
+    } catch (e) { /* δοκίμασε το επόμενο pk */ }
+  }
+  return '';
+}
+
+// Μετατρέπει τα query params σε αναγνώσιμα κριτήρια για την επικεφαλίδα
+function describeFilters(q) {
+  const out = [];
+  if (q.q)             out.push(`Κείμενο: ${q.q}`);
+  if (q.dikigoros_id)  out.push(`Δικηγόρος #${q.dikigoros_id}`);
+  if (q.antidikos_id)  out.push(`Αντίδικος #${q.antidikos_id}`);
+  if (q.onomasia_id)   out.push(`Είδος υπόθεσης #${q.onomasia_id}`);
+  if (q.diadikasia_id) out.push(`Διαδικασία #${q.diadikasia_id}`);
+  if (q.dikastirio_id) out.push(`Δικαστήριο #${q.dikastirio_id}`);
+  if (q.from)          out.push(`Από: ${q.from}`);
+  if (q.to)            out.push(`Έως: ${q.to}`);
+  if (q.ekkremis === 'false') out.push('Περιλαμβάνονται ολοκληρωμένες');
+  return out;
+}
+
+function docxFilename(base) {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return `${base}-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}.docx`;
+}
 router.use(requireAuth);
 
 // ---- Εκκρεμείς υποθέσεις ----
@@ -98,6 +137,25 @@ router.get('/pending', async (req, res) => {
        LIMIT 5000`,
       params
     );
+    if (req.query.format === 'docx') {
+      const buf = buildReportDocx({
+        title: 'Εκκρεμείς Υποθέσεις',
+        subtitle: await orgName(orgId),
+        filters: describeFilters(req.query),
+        columns: [
+          { key: 'xeirokinito_id',  label: 'Πρωτόκολλο',     width: 1000 },
+          { key: 'date_eisagogis',  label: 'Εισαγωγή',       width: 900, type: 'date' },
+          { key: 'onomasia_name',   label: 'Είδος υπόθεσης', width: 1600 },
+          { key: 'pelatis',         label: 'Πελάτης',        width: 1700 },
+          { key: 'antidikos',       label: 'Αντίδικος',      width: 1500 },
+          { key: 'xeiristes',       label: 'Χειριστές',      width: 1700 },
+          { key: 'perilipsi',       label: 'Περίληψη',       width: 2400 },
+        ],
+        rows: r.rows,
+        landscape: true,
+      });
+      return sendDocx(res, buf, docxFilename('Ekkremeis-Ypotheseis'));
+    }
     res.json({ data: r.rows, total: r.rows.length });
   } catch (err) {
     console.error('[reports/pending]', err);
@@ -202,6 +260,27 @@ router.get('/upcoming-hearings', async (req, res) => {
        LIMIT 5000`,
       params
     );
+    if (req.query.format === 'docx') {
+      const buf = buildReportDocx({
+        title: 'Προσεχείς Δικάσιμοι',
+        subtitle: await orgName(orgId),
+        filters: describeFilters(req.query),
+        columns: [
+          { key: 'date',            label: 'Ημ/νία',       width: 900, type: 'date' },
+          { key: 'xeirokinito_id',  label: 'Πρωτόκολλο',   width: 1000 },
+          { key: 'dikastirio_name', label: 'Δικαστήριο',   width: 1600 },
+          { key: 'tmima_name',      label: 'Τμήμα',        width: 1100 },
+          { key: 'diadikasia_name', label: 'Διαδικασία',   width: 1200 },
+          { key: 'pelatis',         label: 'Πελάτης',      width: 1600 },
+          { key: 'antidikos',       label: 'Αντίδικος',    width: 1400 },
+          { key: 'xeiristes',       label: 'Χειριστές',    width: 1500 },
+          { key: 'pinakio',         label: 'Πινάκιο',      width: 700 },
+        ],
+        rows: r.rows,
+        landscape: true,
+      });
+      return sendDocx(res, buf, docxFilename('Prosexeis-Dikasimoi'));
+    }
     res.json({ data: r.rows, total: r.rows.length });
   } catch (err) {
     console.error('[reports/upcoming-hearings]', err);
@@ -293,6 +372,26 @@ router.get('/pending-tasks', async (req, res) => {
        LIMIT 5000`,
       params
     );
+    if (req.query.format === 'docx') {
+      const buf = buildReportDocx({
+        title: 'Λοιπές Ενέργειες',
+        subtitle: await orgName(orgId),
+        filters: describeFilters(req.query),
+        columns: [
+          { key: 'date_dead_line',      label: 'Προθεσμία',      width: 900, type: 'date' },
+          { key: 'xeirokinito_id',      label: 'Πρωτόκολλο',     width: 1000 },
+          { key: 'perigrafi_energias',  label: 'Ενέργεια',       width: 2600 },
+          { key: 'onomasia_name',       label: 'Είδος υπόθεσης', width: 1500 },
+          { key: 'pelatis',             label: 'Πελάτης',        width: 1600 },
+          { key: 'antidikos',           label: 'Αντίδικος',      width: 1300 },
+          { key: 'dikigoroi_energeias', label: 'Δικηγόροι ενέργειας', width: 1500 },
+          { key: 'xeiristes',           label: 'Χειριστές',      width: 1500 },
+        ],
+        rows: r.rows,
+        landscape: true,
+      });
+      return sendDocx(res, buf, docxFilename('Loipes-Energeies'));
+    }
     res.json({ data: r.rows, total: r.rows.length });
   } catch (err) {
     console.error('[reports/pending-tasks]', err);
