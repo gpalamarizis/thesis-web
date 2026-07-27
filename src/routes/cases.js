@@ -64,7 +64,7 @@ router.get('/by-client', async (req, res) => {
 router.get('/', async (req, res) => {
   const orgId = req.user.organization_id;
   const page      = Math.max(1, parseInt(req.query.page || '1', 10));
-  const pageSize  = Math.min(100, Math.max(1, parseInt(req.query.pageSize || '20', 10)));
+  const pageSize  = Math.min(5000, Math.max(1, parseInt(req.query.pageSize || '20', 10)));
   const offset    = (page - 1) * pageSize;
 
   const filters = ['y.organization_id = $1'];
@@ -74,7 +74,33 @@ router.get('/', async (req, res) => {
   if (req.query.ekkremis === 'true')  { filters.push(`y.ekkremis = TRUE`); }
   if (req.query.ekkremis === 'false') { filters.push(`y.ekkremis = FALSE`); }
   if (req.query.q) {
-    filters.push(`(y.xeirokinito_id ILIKE $${i} OR y.perilipsi ILIKE $${i} OR y.onomasia_fakelou ILIKE $${i})`);
+    // Expanded full-text search: case fields + client names (fysiko + nomiko)
+    filters.push(`(
+      y.xeirokinito_id ILIKE $${i}
+      OR y.perilipsi ILIKE $${i}
+      OR y.onomasia_fakelou ILIKE $${i}
+      OR y.old_kod ILIKE $${i}
+      OR EXISTS (
+        SELECT 1 FROM fysika_prosopa fp2
+        WHERE fp2.aa = y.fysiko_prosopo_id
+          AND fp2.organization_id = y.organization_id
+          AND (
+            fp2.eponymo ILIKE $${i}
+            OR fp2.onoma ILIKE $${i}
+            OR (COALESCE(fp2.eponymo,'') || ' ' || COALESCE(fp2.onoma,'')) ILIKE $${i}
+            OR (COALESCE(fp2.onoma,'') || ' ' || COALESCE(fp2.eponymo,'')) ILIKE $${i}
+          )
+      )
+      OR EXISTS (
+        SELECT 1 FROM nomika_prosopa np2
+        WHERE np2.aa = y.nomiko_prosopo_id
+          AND np2.organization_id = y.organization_id
+          AND (
+            np2.eponymia ILIKE $${i}
+            OR np2.diakritikos_titlos ILIKE $${i}
+          )
+      )
+    )`);
     params.push(`%${req.query.q}%`); i++;
   }
   if (req.query.fysiko_prosopo_id) {
