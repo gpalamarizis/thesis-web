@@ -224,12 +224,19 @@ router.get('/pending-tasks', async (req, res) => {
   if (req.query.to)   { filters.push(`e.date_dead_line <= $${i}`); params.push(req.query.to);   i++; }
 
   // v3 FIX: το σχόλιο δήλωνε ότι δέχεται dikigoros_id αλλά ΔΕΝ ήταν υλοποιημένο.
-  // Ταιριάζει με τον χειριστή της υπόθεσης στην οποία ανήκει η ενέργεια.
+  // Ταιριάζει (α) με τον δικηγόρο της ΙΔΙΑΣ της ενέργειας (energeies_loipes_dikigoroi)
+  //          (β) με τον χειριστή της υπόθεσης στην οποία ανήκει η ενέργεια.
   if (req.query.dikigoros_id) {
-    filters.push(`EXISTS (SELECT 1 FROM xeiristes_dikigoroi xd
-                           WHERE xd.ypotheseis_id = e.ypotheseis_id
-                             AND xd.organization_id = e.organization_id
-                             AND xd.dikigoroi_grafeiou_id = $${i})`);
+    filters.push(`(
+      EXISTS (SELECT 1 FROM energeies_loipes_dikigoroi eld
+               WHERE eld.loiph_energeia_id = e.aa
+                 AND eld.organization_id = e.organization_id
+                 AND eld.lawyer_id = $${i})
+      OR EXISTS (SELECT 1 FROM xeiristes_dikigoroi xd
+                  WHERE xd.ypotheseis_id = e.ypotheseis_id
+                    AND xd.organization_id = e.organization_id
+                    AND xd.dikigoroi_grafeiou_id = $${i})
+    )`);
     params.push(parseInt(req.query.dikigoros_id, 10)); i++;
   }
 
@@ -261,6 +268,13 @@ router.get('/pending-tasks', async (req, res) => {
          COALESCE(fp.eponymo || ' ' || COALESCE(fp.onoma,''), np.eponymia) AS pelatis,
          yo.name AS onomasia_name,
          a.eponymo AS antidikos,
+         COALESCE((
+           SELECT string_agg(dg.eponymo || ' ' || COALESCE(dg.onoma,''), ', ' ORDER BY dg.eponymo)
+             FROM energeies_loipes_dikigoroi eld
+             JOIN dikigoroi_grafeiou dg ON dg.aa = eld.lawyer_id
+            WHERE eld.loiph_energeia_id = e.aa
+              AND eld.organization_id = e.organization_id
+         ), '') AS dikigoroi_energeias,
          COALESCE((
            SELECT string_agg(dg.eponymo || ' ' || COALESCE(dg.onoma,''), ', ' ORDER BY dg.eponymo)
              FROM xeiristes_dikigoroi xd
