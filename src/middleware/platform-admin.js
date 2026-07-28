@@ -1,8 +1,8 @@
 // src/middleware/platform-admin.js
 // Middleware that requires the authenticated user to have is_platform_admin = true.
-// Must be used AFTER authenticateJWT middleware.
+// Must be used AFTER requireAuth middleware.
 
-export function requirePlatformAdmin(req, res, next) {
+function requirePlatformAdmin(req, res, next) {
   if (!req.user) {
     return res.status(401).json({ error: 'Not authenticated' });
   }
@@ -11,3 +11,5 @@ export function requirePlatformAdmin(req, res, next) {
   }
   next();
 }
+
+module.exports = { requirePlatformAdmin };

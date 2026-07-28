@@ -9,6 +9,7 @@ function signToken(user) {
       organization_id: user.organization_id,
       email: user.email,
       role: user.role,
+      is_platform_admin: user.is_platform_admin || false,
     },
     JWT_SECRET,
     { expiresIn: '7d' }
@@ -27,6 +28,7 @@ function requireAuth(req, res, next) {
       organization_id: payload.organization_id,
       email: payload.email,
       role: payload.role,
+      is_platform_admin: payload.is_platform_admin || false,
     };
     next();
   } catch (e) {
@@ -43,4 +45,7 @@ function requireRole(...roles) {
   };
 }
 
-module.exports = { signToken, requireAuth, requireRole, JWT_SECRET };
+// authenticateJWT: alias του requireAuth (το admin-orgs.js το καλεί έτσι)
+const authenticateJWT = requireAuth;
+
+module.exports = { signToken, requireAuth, authenticateJWT, requireRole, JWT_SECRET };

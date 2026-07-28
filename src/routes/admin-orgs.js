@@ -2,11 +2,11 @@
 // Platform admin CRUD routes for organizations and users.
 // Mount: app.use('/api/admin', adminOrgsRouter);
 
-import express from 'express';
-import bcrypt from 'bcryptjs';
-import { authenticateJWT } from '../middleware/auth.js';
-import { requirePlatformAdmin } from '../middleware/platform-admin.js';
-import { pool } from '../db.js';
+const express = require('express');
+const bcrypt = require('bcryptjs');
+const { authenticateJWT } = require('../middleware/auth');
+const { requirePlatformAdmin } = require('../middleware/platform-admin');
+const { pool } = require('../db');
 
 const router = express.Router();
 
@@ -363,4 +363,4 @@ router.delete('/users/:id', async (req, res) => {
   }
 });
 
-export default router;
+module.exports = router;
