@@ -221,8 +221,42 @@ router.delete('/organizations/:id', async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    await client.query(`DELETE FROM users WHERE organization_id = $1`, [id]);
-    const { rowCount } = await client.query(`DELETE FROM organizations WHERE id = $1`, [id]);
+
+    // v2: Οι περισσότεροι πίνακες έχουν FK organization_id ON DELETE CASCADE,
+    // οπότε το DELETE FROM organizations τους σβήνει αυτόματα. ΟΜΩΣ 11 πίνακες
+    // έχουν στήλη organization_id ΧΩΡΙΣ δηλωμένο FK — δεν σβήνονται με cascade
+    // και θα άφηναν ορφανές γραμμές. Τους σβήνουμε ρητά πρώτα.
+    //
+    // Προϋπόθεση: το FK case_documents.uploaded_by -> users να είναι
+    // ON DELETE SET NULL (migrate-fk-cascade), αλλιώς μπλοκάρει το cascade.
+
+    const noCascadeTables = [
+      'addresses',
+      'phone_numbers',
+      'case_suggestion_feedback',
+      'document_templates',
+      'energeies_loipes_dikigoroi',
+      'finance_exoda_exoterikon_synergaton',
+      'finance_pagia_exoda',
+      'finance_pososta_dikigoron',
+      'invoice_series',
+      'invoices',              // invoice_lines φεύγει με cascade μέσω invoice_id
+      'organization_settings',
+    ];
+    for (const t of noCascadeTables) {
+      try {
+        await client.query(`DELETE FROM ${t} WHERE organization_id = $1`, [id]);
+      } catch (e) {
+        // Αν κάποιος πίνακας δεν υπάρχει σε αυτό το περιβάλλον, προχώρα
+        if (e.code !== '42P01') throw e; // 42P01 = undefined_table
+      }
+    }
+
+    // Τώρα το organization: cascade σβήνει τους υπόλοιπους 39 πίνακες
+    // (users, ypotheseis, case_documents, energeies, κ.λπ.) αυτόματα.
+    const { rowCount } = await client.query(
+      `DELETE FROM organizations WHERE id = $1`, [id]);
+
     if (rowCount === 0) {
       await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Not found' });
@@ -234,7 +268,7 @@ router.delete('/organizations/:id', async (req, res) => {
     console.error('[admin/orgs delete]', err);
     res.status(500).json({
       error: err.message,
-      hint: 'Org has references in other tables. Suspend instead of deleting.'
+      hint: 'Η διαγραφή απέτυχε. Βεβαιωθείτε ότι έτρεξε το migrate-fk-cascade (case_documents.uploaded_by -> SET NULL).'
     });
   } finally {
     client.release();
