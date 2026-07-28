@@ -1,4 +1,4 @@
-﻿{
+{
     "name": "thesis-web",
     "version": "3.0.0",
     "description": "Thesis - Legal Case Management (v3, multi-tenant with full VB.NET parity)",
@@ -18,12 +18,12 @@
         "bcryptjs": "^2.4.3",
         "cors": "^2.8.5",
         "docxtemplater": "^3.69.0",
-        "nodemailer": "^6.9.0",
         "dotenv": "^16.4.5",
         "express": "^4.19.2",
         "helmet": "^7.1.0",
         "jsonwebtoken": "^9.0.2",
         "multer": "^1.4.5-lts.1",
+        "nodemailer": "^6.9.0",
         "pg": "^8.12.0",
         "pizzip": "^3.2.0"
     },
