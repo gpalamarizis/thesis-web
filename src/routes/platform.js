@@ -9,6 +9,7 @@
 // Auto-creates required tables + columns on first request (idempotent).
 
 const express = require('express');
+const bcrypt = require('bcryptjs');
 const { pool } = require('../db');
 const { requireAuth } = require('../middleware/auth');
 
