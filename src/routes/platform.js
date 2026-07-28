@@ -570,8 +570,12 @@ router.post('/organizations', async (req, res) => {
         name, slug, plan_type, subscription_status,
         trial_ends_at, subscription_ends_at,
         max_users, storage_quota_mb,
-        billing_email, billing_afm, billing_phone, notes
-      ) VALUES ($1, $2, $3, 'active', NULL, $4, $5, $6, $7, $8, $9, $10)
+        billing_email, billing_afm, billing_phone, notes,
+        customer_no
+      ) VALUES ($1, $2, $3, 'active', NULL, $4, $5, $6, $7, $8, $9, $10,
+        -- Αύξων αριθμός πελάτη: ο επόμενος μετά τον μεγαλύτερο υπάρχοντα.
+        -- Μαύρος = 1, Κουβέλης = 2, κάθε νέα εταιρεία παίρνει τον επόμενο.
+        (SELECT COALESCE(MAX(customer_no), 0) + 1 FROM organizations))
       RETURNING *
     `, [
       name, slug, plan_type, endDate.toISOString(),
