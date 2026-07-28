@@ -1,46 +1,54 @@
 // src/services/email.js
-// v5: Αποστολή ΑΠΟΚΛΕΙΣΤΙΚΑ μέσω dnHost SMTP (nodemailer). Το SendGrid αφαιρέθηκε.
-// Το Railway επιβεβαιώθηκε ότι ΔΕΝ μπλοκάρει τη θύρα 587.
+// v6: Αποστολή μέσω dnHost SMTP με ΑΥΤΟΜΑΤΗ δοκιμή θυρών.
+// Το Railway επιβεβαιώθηκε ότι δεν μπλοκάρει SMTP. Το SendGrid αφαιρέθηκε.
 //
-// Μεταβλητές περιβάλλοντος (Railway -> Variables):
+// Δοκιμάζει με σειρά τους συνδυασμούς θύρας/κρυπτογράφησης μέχρι να πετύχει,
+// και θυμάται τον νικητή για τα επόμενα emails. Έτσι δουλεύει ό,τι κι αν
+// λέει το SMTP_PORT/SMTP_SECURE στις μεταβλητές.
+//
+// Μεταβλητές (Railway -> Variables):
 //   SMTP_HOST          mail.thesislegal.gr
-//   SMTP_PORT          587
-//   SMTP_SECURE        false        (STARTTLS στην 587)
 //   SMTP_USER          noreply@thesislegal.gr   (ΟΛΟΚΛΗΡΗ διεύθυνση)
 //   SMTP_PASS          ο κωδικός του email
-//   SMTP_TLS_INSECURE  true         (το πιστοποιητικό dnHost είναι *.mynewserver.com)
+//   SMTP_TLS_INSECURE  true    (πιστοποιητικό dnHost = *.mynewserver.com)
 //   SMTP_FROM          Thesis <noreply@thesislegal.gr>
 //   FRONTEND_URL       https://app.thesislegal.gr
+//   (SMTP_PORT / SMTP_SECURE προαιρετικά — αν οριστούν, δοκιμάζονται πρώτα)
 
 const nodemailer = require('nodemailer');
 
-let _transporter = null;
-function getTransporter() {
-  if (_transporter) return _transporter;
+let _cachedConfig = null; // ο συνδυασμός που δούλεψε
 
+function candidatePorts() {
+  const list = [];
+  // Αν ο χρήστης όρισε ρητά, μπαίνει πρώτος
+  if (process.env.SMTP_PORT) {
+    const port = parseInt(process.env.SMTP_PORT, 10);
+    const secure = String(process.env.SMTP_SECURE || (port === 465 ? 'true' : 'false')) === 'true';
+    list.push({ port, secure });
+  }
+  // Πάντα δοκίμασε και τους δύο βασικούς συνδυασμούς ως fallback
+  for (const c of [{ port: 587, secure: false }, { port: 465, secure: true }]) {
+    if (!list.some(x => x.port === c.port)) list.push(c);
+  }
+  return list;
+}
+
+function buildTransport({ port, secure }) {
   const host = process.env.SMTP_HOST;
   const user = process.env.SMTP_USER;
   const pass = process.env.SMTP_PASS;
-  if (!host || !user || !pass) {
-    console.warn('[email] SMTP not configured (SMTP_HOST/SMTP_USER/SMTP_PASS)');
-    return null;
-  }
-
-  const port = parseInt(process.env.SMTP_PORT || '587', 10);
-  const secure = String(process.env.SMTP_SECURE || 'false') === 'true';
   const insecure = String(process.env.SMTP_TLS_INSECURE || 'false') === 'true';
-
-  _transporter = nodemailer.createTransport({
+  return nodemailer.createTransport({
     host, port, secure,
     auth: { user, pass },
-    connectionTimeout: 15000,
-    greetingTimeout: 15000,
-    socketTimeout: 20000,
+    connectionTimeout: 12000,
+    greetingTimeout: 12000,
+    socketTimeout: 15000,
     tls: insecure
       ? { rejectUnauthorized: false }
       : { minVersion: 'TLSv1.2', servername: host },
   });
-  return _transporter;
 }
 
 function parseFrom() {
@@ -64,26 +72,46 @@ function baseTemplate(body) {
 }
 
 async function send({ to, subject, html, text }) {
-  const t = getTransporter();
-  if (!t) {
-    console.error(`[email] NOT SENT to ${to}: SMTP not configured`);
+  const host = process.env.SMTP_HOST;
+  const user = process.env.SMTP_USER;
+  const pass = process.env.SMTP_PASS;
+  if (!host || !user || !pass) {
+    console.error(`[email] NOT SENT to ${to}: SMTP not configured (SMTP_HOST/USER/PASS)`);
     return { skipped: true, reason: 'smtp not configured' };
   }
+
   const from = parseFrom();
   const wrapped = baseTemplate(html);
-  try {
-    const info = await t.sendMail({
-      from: `"${from.name}" <${from.email}>`,
-      to, subject,
-      text: text || wrapped.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim(),
-      html: wrapped,
-    });
-    console.log(`[email] sent to ${to} (${info.messageId})`);
-    return { messageId: info.messageId };
-  } catch (err) {
-    console.error(`[email] send failed to ${to}: ${err.message}`);
-    throw err;
+  const mail = {
+    from: `"${from.name}" <${from.email}>`,
+    to, subject,
+    text: text || wrapped.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim(),
+    html: wrapped,
+  };
+
+  // Αν έχουμε ήδη βρει συνδυασμό που δουλεύει, χρησιμοποίησέ τον
+  const configs = _cachedConfig ? [_cachedConfig] : candidatePorts();
+
+  let lastErr = null;
+  for (const cfg of configs) {
+    const t = buildTransport(cfg);
+    try {
+      const info = await t.sendMail(mail);
+      t.close();
+      _cachedConfig = cfg; // θυμήσου τον νικητή
+      console.log(`[email] sent to ${to} via port ${cfg.port} (${info.messageId})`);
+      return { messageId: info.messageId, port: cfg.port };
+    } catch (err) {
+      t.close();
+      lastErr = err;
+      console.warn(`[email] port ${cfg.port} failed: ${err.message.split('\n')[0]}`);
+      // Αν είναι λάθος στοιχεία, δεν έχει νόημα να δοκιμάσουμε άλλη θύρα
+      if (err.code === 'EAUTH' || /535|authentication/i.test(err.message)) break;
+    }
   }
+
+  console.error(`[email] NOT SENT to ${to}: ${lastErr ? lastErr.message.split('\n')[0] : 'unknown'}`);
+  throw lastErr || new Error('email send failed');
 }
 
 async function sendWelcome({ to, firstName, organizationName }) {
