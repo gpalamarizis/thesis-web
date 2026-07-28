@@ -99,8 +99,8 @@ router.post('/login', async (req, res) => {
     const r = await pool.query(
       `SELECT u.*, o.name AS organization_name
          FROM users u
-         JOIN organizations o ON o.id = u.organization_id
-        WHERE u.email = $1 AND u.is_active = TRUE
+         LEFT JOIN organizations o ON o.id = u.organization_id
+        WHERE LOWER(u.email) = $1 AND u.is_active = TRUE
         LIMIT 1`,
       [String(email).toLowerCase()]
     );
@@ -141,7 +141,7 @@ router.get('/me', requireAuth, async (req, res) => {
               o.visibility_mode, o.plan_type, o.subscription_status, o.trial_ends_at, o.subscription_ends_at,
               o.suspended
          FROM users u
-         JOIN organizations o ON o.id = u.organization_id
+         LEFT JOIN organizations o ON o.id = u.organization_id
         WHERE u.id = $1`,
       [req.user.id]
     );
