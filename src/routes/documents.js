@@ -46,9 +46,56 @@ function getS3() {
   return s3;
 }
 
+// Το όνομα του bucket. ΠΡΟΣΟΧΗ: στο Railway η μεταβλητή λέγεται R2_BUCKET_NAME,
+// αλλά παλιότερα ο κώδικας διάβαζε μόνο R2_BUCKET -> έπεφτε σε λάθος fallback
+// και ΚΑΝΕΝΑ αρχείο δεν ανέβαινε. Τώρα δέχεται και τα δύο ονόματα.
+function getBucket() {
+  const b = process.env.R2_BUCKET_NAME || process.env.R2_BUCKET;
+  if (!b) throw new Error('R2 bucket not configured (R2_BUCKET_NAME ή R2_BUCKET)');
+  return b;
+}
+
+// --- Διόρθωση ελληνικών ονομάτων αρχείων ---
+// Το multer/busboy διαβάζει το filename του multipart ως latin1, οπότε τα
+// ελληνικά (UTF-8) καταστρέφονται: "Αγορά.pdf" -> "ÎÎ³Î¿ÏÎ¬.pdf".
+// Επαναφέρουμε τα bytes σε UTF-8. Αν το αποτέλεσμα δεν είναι έγκυρο,
+// κρατάμε το αρχικό ώστε να μη χαλάσουμε ονόματα που ήταν ήδη σωστά.
+function fixFilename(name) {
+  if (!name) return name;
+  try {
+    const decoded = Buffer.from(name, 'latin1').toString('utf8');
+    // Αν προέκυψαν χαρακτήρες αντικατάστασης, η μετατροπή ήταν λάθος
+    if (decoded.includes('\uFFFD')) return name;
+    // Αν το αρχικό ήταν καθαρό ASCII, δεν χρειάζεται αλλαγή
+    if (!/[\u0080-\u00FF]/.test(name)) return name;
+    return decoded;
+  } catch (e) {
+    return name;
+  }
+}
+
+// Απαγορευμένοι τύποι: εκτελέσιμα και Office με macros.
+// Ό,τι ΑΛΛΟ επιτρέπεται (PDF, Word, Excel, εικόνες, zip, κ.λπ.)
+const BLOCKED_EXT = new Set([
+  'exe', 'com', 'bat', 'cmd', 'scr', 'pif', 'msi', 'msp', 'cpl',
+  'js', 'jse', 'vbs', 'vbe', 'wsf', 'wsh', 'ps1', 'psm1', 'reg',
+  'jar', 'app', 'dmg', 'sh',
+  'docm', 'dotm', 'xlsm', 'xltm', 'xlam', 'pptm', 'potm', 'ppam', 'sldm',
+]);
+
+function fileFilter(req, file, cb) {
+  const name = fixFilename(file.originalname || '');
+  const ext = name.includes('.') ? name.split('.').pop().toLowerCase() : '';
+  if (BLOCKED_EXT.has(ext)) {
+    return cb(new Error(`Ο τύπος αρχείου .${ext} δεν επιτρέπεται για λόγους ασφαλείας.`));
+  }
+  cb(null, true);
+}
+
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 50 * 1024 * 1024 },   // 50 MB
+  fileFilter,
 });
 
 // GET /api/documents?ypothesi_id=..
@@ -72,8 +119,22 @@ router.get('/', async (req, res) => {
   }
 });
 
+// Wrapper για το multer ώστε τα σφάλματα (μπλοκαρισμένος τύπος, μέγεθος)
+// να επιστρέφουν καθαρό μήνυμα αντί για γενικό 500.
+function uploadSingle(req, res, next) {
+  upload.single('file')(req, res, (err) => {
+    if (err) {
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(413).json({ error: 'Το αρχείο ξεπερνά τα 50 MB.' });
+      }
+      return res.status(400).json({ error: err.message });
+    }
+    next();
+  });
+}
+
 // POST /api/documents  (multipart: file, ypothesi_id)
-router.post('/', upload.single('file'), async (req, res) => {
+router.post('/', uploadSingle, async (req, res) => {
   const orgId = req.user.organization_id;
   const ypothesi_id = parseInt(req.body.ypothesi_id, 10);
 
@@ -91,8 +152,11 @@ router.post('/', upload.single('file'), async (req, res) => {
     return res.status(500).json({ error: err.message });
   }
 
-  const bucket = process.env.R2_BUCKET || 'thesis-documents';
-  const key    = `org-${orgId}/case-${ypothesi_id}/${Date.now()}-${req.file.originalname.replace(/[^A-Za-z0-9._-]/g, '_')}`;
+  const bucket = getBucket();
+  // Το πραγματικό όνομα (με ελληνικά) για εμφάνιση/λήψη
+  const displayName = fixFilename(req.file.originalname);
+  // Το R2 key μένει ASCII-safe για συμβατότητα
+  const key    = `org-${orgId}/case-${ypothesi_id}/${Date.now()}-${displayName.replace(/[^A-Za-z0-9._-]/g, '_')}`;
 
   try {
     await getS3().send(new PutObjectCommand({
@@ -106,7 +170,7 @@ router.post('/', upload.single('file'), async (req, res) => {
       `INSERT INTO case_documents
          (organization_id, ypothesi_id, filename, r2_key, mime_type, size_bytes, uploaded_by)
        VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-      [orgId, ypothesi_id, req.file.originalname, key, req.file.mimetype, req.file.size, req.user.id]
+      [orgId, ypothesi_id, displayName, key, req.file.mimetype, req.file.size, req.user.id]
     );
     res.status(201).json(r.rows[0]);
   } catch (err) {
@@ -129,7 +193,7 @@ router.get('/:id/download-url', async (req, res) => {
     const url = await getSignedUrl(
       getS3(),
       new GetObjectCommand({
-        Bucket: process.env.R2_BUCKET || 'thesis-documents',
+        Bucket: getBucket(),
         Key: doc.r2_key,
       }),
       { expiresIn: 300 }   // 5 min
@@ -155,7 +219,7 @@ router.delete('/:id', async (req, res) => {
     // πρώτα από R2 (best-effort)
     try {
       await getS3().send(new DeleteObjectCommand({
-        Bucket: process.env.R2_BUCKET || 'thesis-documents',
+        Bucket: getBucket(),
         Key: doc.r2_key,
       }));
     } catch (r2err) {
