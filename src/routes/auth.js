@@ -1,4 +1,5 @@
 const express = require('express');
+const crypto  = require('crypto');
 const bcrypt  = require('bcryptjs');
 const { pool } = require('../db');
 const emailSvc = require('../services/email');
@@ -148,6 +149,116 @@ router.get('/me', requireAuth, async (req, res) => {
     res.json({ user: r.rows[0] });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// PASSWORD RESET
+// Χρησιμοποιεί τις υπάρχουσες στήλες users.password_reset_token και
+// users.password_reset_expires_at. Καμία migration δεν χρειάζεται.
+// ---------------------------------------------------------------------------
+
+// Πάντα ίδια απάντηση, ώστε να μην αποκαλύπτεται ποια emails είναι εγγεγραμμένα
+const RESET_GENERIC = { message: 'Αν το email αντιστοιχεί σε λογαριασμό, στάλθηκε σύνδεσμος επαναφοράς.' };
+
+// POST /api/auth/forgot-password  { email }
+router.post('/forgot-password', async (req, res) => {
+  const email = (req.body && req.body.email || '').trim().toLowerCase();
+  if (!email) return res.status(400).json({ error: 'email required' });
+
+  try {
+    const r = await pool.query(
+      `SELECT id, email, first_name, is_active FROM users WHERE LOWER(email) = $1 LIMIT 1`,
+      [email]
+    );
+
+    // Ίδια απάντηση είτε υπάρχει είτε όχι
+    if (r.rows.length === 0 || r.rows[0].is_active === false) {
+      return res.json(RESET_GENERIC);
+    }
+    const user = r.rows[0];
+
+    // Token: 32 τυχαία bytes. Αποθηκεύουμε το SHA-256 hash, όχι το ίδιο το token.
+    const rawToken = crypto.randomBytes(32).toString('hex');
+    const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+    const expires = new Date(Date.now() + 60 * 60 * 1000); // 60 λεπτά
+
+    await pool.query(
+      `UPDATE users SET password_reset_token = $1, password_reset_expires_at = $2, updated_at = now()
+       WHERE id = $3`,
+      [tokenHash, expires, user.id]
+    );
+
+    const frontend = (process.env.FRONTEND_URL || 'https://app.thesislegal.gr').replace(/\/$/, '');
+    const resetUrl = `${frontend}/reset-password?token=${rawToken}`;
+
+    try {
+      await emailSvc.sendPasswordReset({ to: user.email, firstName: user.first_name, resetUrl });
+    } catch (mailErr) {
+      console.error('[forgot-password] email failed:', mailErr.message);
+      // Δεν αποκαλύπτουμε το σφάλμα στον χρήστη
+    }
+
+    return res.json(RESET_GENERIC);
+  } catch (err) {
+    console.error('[forgot-password]', err.message);
+    return res.status(500).json({ error: 'server error' });
+  }
+});
+
+// GET /api/auth/reset-password/:token  -> { valid: bool }
+router.get('/reset-password/:token', async (req, res) => {
+  const raw = req.params.token || '';
+  if (!raw) return res.json({ valid: false });
+  try {
+    const tokenHash = crypto.createHash('sha256').update(raw).digest('hex');
+    const r = await pool.query(
+      `SELECT id FROM users
+        WHERE password_reset_token = $1 AND password_reset_expires_at > now()
+        LIMIT 1`,
+      [tokenHash]
+    );
+    return res.json({ valid: r.rows.length > 0 });
+  } catch (err) {
+    console.error('[reset-password check]', err.message);
+    return res.json({ valid: false });
+  }
+});
+
+// POST /api/auth/reset-password  { token, new_password }
+router.post('/reset-password', async (req, res) => {
+  const raw = (req.body && req.body.token || '').trim();
+  const newPassword = (req.body && req.body.new_password) || '';
+  if (!raw || !newPassword) return res.status(400).json({ error: 'token + new_password required' });
+  if (newPassword.length < 8) return res.status(400).json({ error: 'Ο κωδικός πρέπει να έχει τουλάχιστον 8 χαρακτήρες' });
+
+  try {
+    const tokenHash = crypto.createHash('sha256').update(raw).digest('hex');
+    const r = await pool.query(
+      `SELECT id FROM users
+        WHERE password_reset_token = $1 AND password_reset_expires_at > now()
+        LIMIT 1`,
+      [tokenHash]
+    );
+    if (r.rows.length === 0) {
+      return res.status(400).json({ error: 'Ο σύνδεσμος έχει λήξει ή είναι μη έγκυρος.' });
+    }
+
+    const passwordHash = await bcrypt.hash(newPassword, 10);
+    await pool.query(
+      `UPDATE users
+          SET password_hash = $1,
+              password_reset_token = NULL,
+              password_reset_expires_at = NULL,
+              updated_at = now()
+        WHERE id = $2`,
+      [passwordHash, r.rows[0].id]
+    );
+
+    return res.json({ message: 'Ο κωδικός ενημερώθηκε. Μπορείτε να συνδεθείτε.' });
+  } catch (err) {
+    console.error('[reset-password]', err.message);
+    return res.status(500).json({ error: 'server error' });
   }
 });
 

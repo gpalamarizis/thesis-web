@@ -1,45 +1,52 @@
 // src/services/email.js
-// SendGrid HTTP API (port 443) - παρακάμπτει SMTP block.
-// Απαιτεί: SENDGRID_API_KEY (ή SMTP_PASS αν είναι SG.xxx)
-// SMTP_FROM = "Thesis <verified@email>"
+// v5: Αποστολή ΑΠΟΚΛΕΙΣΤΙΚΑ μέσω dnHost SMTP (nodemailer). Το SendGrid αφαιρέθηκε.
+// Το Railway επιβεβαιώθηκε ότι ΔΕΝ μπλοκάρει τη θύρα 587.
+//
+// Μεταβλητές περιβάλλοντος (Railway -> Variables):
+//   SMTP_HOST          mail.thesislegal.gr
+//   SMTP_PORT          587
+//   SMTP_SECURE        false        (STARTTLS στην 587)
+//   SMTP_USER          noreply@thesislegal.gr   (ΟΛΟΚΛΗΡΗ διεύθυνση)
+//   SMTP_PASS          ο κωδικός του email
+//   SMTP_TLS_INSECURE  true         (το πιστοποιητικό dnHost είναι *.mynewserver.com)
+//   SMTP_FROM          Thesis <noreply@thesislegal.gr>
+//   FRONTEND_URL       https://app.thesislegal.gr
 
-async function sgSend({ to, subject, html, text }) {
-  const apiKey = process.env.SENDGRID_API_KEY || process.env.SMTP_PASS;
-  const fromRaw = process.env.SMTP_FROM || 'Thesis <no-reply@thesis.gr>';
-  if (!apiKey || !apiKey.startsWith('SG.')) {
-    console.warn('[email] SENDGRID_API_KEY missing or invalid');
-    return { skipped: true, reason: 'no api key' };
+const nodemailer = require('nodemailer');
+
+let _transporter = null;
+function getTransporter() {
+  if (_transporter) return _transporter;
+
+  const host = process.env.SMTP_HOST;
+  const user = process.env.SMTP_USER;
+  const pass = process.env.SMTP_PASS;
+  if (!host || !user || !pass) {
+    console.warn('[email] SMTP not configured (SMTP_HOST/SMTP_USER/SMTP_PASS)');
+    return null;
   }
 
-  // Parse "Name <email>"
-  let fromEmail = fromRaw, fromName = 'Thesis';
-  const m = fromRaw.match(/^(.+?)\s*<(.+?)>$/);
-  if (m) { fromName = m[1].trim(); fromEmail = m[2].trim(); }
+  const port = parseInt(process.env.SMTP_PORT || '587', 10);
+  const secure = String(process.env.SMTP_SECURE || 'false') === 'true';
+  const insecure = String(process.env.SMTP_TLS_INSECURE || 'false') === 'true';
 
-  const body = {
-    personalizations: [{ to: [{ email: to }] }],
-    from: { email: fromEmail, name: fromName },
-    subject,
-    content: [
-      { type: 'text/plain', value: text || html.replace(/<[^>]+>/g, '') },
-      { type: 'text/html',  value: html },
-    ],
-  };
-
-  const r = await fetch('https://api.sendgrid.com/v3/mail/send', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(body),
+  _transporter = nodemailer.createTransport({
+    host, port, secure,
+    auth: { user, pass },
+    connectionTimeout: 15000,
+    greetingTimeout: 15000,
+    socketTimeout: 20000,
+    tls: insecure
+      ? { rejectUnauthorized: false }
+      : { minVersion: 'TLSv1.2', servername: host },
   });
+  return _transporter;
+}
 
-  if (!r.ok) {
-    const errText = await r.text();
-    throw new Error(`SendGrid ${r.status}: ${errText}`);
-  }
-  return { messageId: r.headers.get('x-message-id') };
+function parseFrom() {
+  const raw = process.env.SMTP_FROM || 'Thesis <noreply@thesislegal.gr>';
+  const m = raw.match(/^(.+?)\s*<(.+?)>$/);
+  return m ? { name: m[1].trim(), email: m[2].trim() } : { name: 'Thesis', email: raw };
 }
 
 function baseTemplate(body) {
@@ -57,11 +64,30 @@ function baseTemplate(body) {
 }
 
 async function send({ to, subject, html, text }) {
-  return sgSend({ to, subject, html: baseTemplate(html), text });
+  const t = getTransporter();
+  if (!t) {
+    console.error(`[email] NOT SENT to ${to}: SMTP not configured`);
+    return { skipped: true, reason: 'smtp not configured' };
+  }
+  const from = parseFrom();
+  const wrapped = baseTemplate(html);
+  try {
+    const info = await t.sendMail({
+      from: `"${from.name}" <${from.email}>`,
+      to, subject,
+      text: text || wrapped.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim(),
+      html: wrapped,
+    });
+    console.log(`[email] sent to ${to} (${info.messageId})`);
+    return { messageId: info.messageId };
+  } catch (err) {
+    console.error(`[email] send failed to ${to}: ${err.message}`);
+    throw err;
+  }
 }
 
 async function sendWelcome({ to, firstName, organizationName }) {
-  const url = process.env.FRONTEND_URL || 'https://thesis-frontend.gpal.workers.dev';
+  const url = (process.env.FRONTEND_URL || 'https://app.thesislegal.gr').replace(/\/$/, '');
   return send({
     to, subject: 'Καλωσορίσατε στο Thesis',
     html: `
@@ -74,7 +100,7 @@ async function sendWelcome({ to, firstName, organizationName }) {
 }
 
 async function sendTrialEnding({ to, firstName, daysLeft }) {
-  const url = process.env.FRONTEND_URL || 'https://thesis-frontend.gpal.workers.dev';
+  const url = (process.env.FRONTEND_URL || 'https://app.thesislegal.gr').replace(/\/$/, '');
   const urgent = daysLeft <= 3;
   return send({
     to, subject: urgent ? `Απομένουν ${daysLeft} ημέρες trial` : `Λήγει σε ${daysLeft} ημέρες η δοκιμαστική`,
@@ -102,12 +128,17 @@ async function sendInvoiceSent({ to, firstName, invoiceNumber, clientName, amoun
   });
 }
 
-async function sendPasswordReset({ to, firstName, newPassword }) {
+async function sendPasswordReset({ to, firstName, resetUrl }) {
   return send({
-    to, subject: 'Ενημέρωση κωδικού πρόσβασης',
-    html: `<h2>Ο κωδικός σας άλλαξε</h2>
-      <p>Νέος κωδικός: <code>${newPassword}</code></p>
-      <p>Σας συνιστούμε να τον αλλάξετε άμεσα μετά τη σύνδεση.</p>`,
+    to, subject: 'Επαναφορά κωδικού πρόσβασης — Thesis',
+    html: `<h2 style="color:#1F3864;">Επαναφορά κωδικού</h2>
+      <p>Γεια σας ${firstName || ''},</p>
+      <p>Λάβαμε αίτημα επαναφοράς του κωδικού σας. Πατήστε το κουμπί για να ορίσετε νέο κωδικό:</p>
+      <div style="margin:24px 0;">
+        <a href="${resetUrl}" style="background:#2E75B6; color:#fff; padding:12px 24px; text-decoration:none; border-radius:6px; display:inline-block;">Ορισμός νέου κωδικού</a>
+      </div>
+      <p style="font-size:13px; color:#718096;">Ο σύνδεσμος λήγει σε <b>60 λεπτά</b>. Αν δεν ζητήσατε επαναφορά, αγνοήστε αυτό το email — ο κωδικός σας παραμένει ίδιος.</p>
+      <p style="font-size:12px; color:#a0aec0; word-break:break-all;">Αν το κουμπί δεν λειτουργεί, αντιγράψτε: ${resetUrl}</p>`,
   });
 }
 
