@@ -22,6 +22,17 @@ function getEnv() {
   return process.env.VIVA_ENV || 'demo';
 }
 
+/**
+ * Έλεγχος ότι όλες οι απαραίτητες μεταβλητές υπάρχουν.
+ * Καλείται από το /api/subscriptions/health για γρήγορη διάγνωση.
+ */
+function checkConfig() {
+  const needed = ['VIVA_CLIENT_ID', 'VIVA_CLIENT_SECRET', 'VIVA_SOURCE_CODE',
+                  'VIVA_MERCHANT_ID', 'VIVA_API_KEY'];
+  const missing = needed.filter(k => !process.env[k]);
+  return { env: getEnv(), ok: missing.length === 0, missing, urls: getBaseUrls() };
+}
+
 function getBaseUrls() {
   if (getEnv() === 'production') {
     return {
@@ -81,12 +92,11 @@ async function getAccessToken() {
  * Returns: orderCode (integer) → use in checkout URL
  */
 async function createPaymentOrder({ amount, customerEmail, customerName, customerPhone, orderId, description }) {
-  const { VIVA_SOURCE_CODE, FRONTEND_URL } = process.env;
+  const { VIVA_SOURCE_CODE } = process.env;
   if (!VIVA_SOURCE_CODE) throw new Error('VIVA_SOURCE_CODE not configured');
 
   const token = await getAccessToken();
   const { api } = getBaseUrls();
-  const [firstName, ...rest] = String(customerName || '').split(' ');
 
   const body = {
     amount: Math.round(Number(amount) * 100), // cents
@@ -107,8 +117,10 @@ async function createPaymentOrder({ amount, customerEmail, customerName, custome
     sourceCode: VIVA_SOURCE_CODE,
     merchantTrns: orderId,           // <-- our internal reference
     tags: ['thesis-subscription'],
-    successUrl: FRONTEND_URL ? `${FRONTEND_URL}/subscription/success` : undefined,
-    failureUrl: FRONTEND_URL ? `${FRONTEND_URL}/subscription/failure` : undefined,
+    // ΣΗΜΕΙΩΣΗ: τα success/failure URLs ΔΕΝ στέλνονται εδώ.
+    // Ορίζονται στο Payment Source (Viva dashboard):
+    //   Sales -> Online Payments -> Websites/Apps -> <το source σου>
+    // Αν σταλούν ως άγνωστα πεδία, κάποιες εκδόσεις του API τα απορρίπτουν.
   };
 
   const r = await fetch(`${api}/checkout/v2/orders`, {
@@ -172,6 +184,7 @@ async function getWebhookVerificationKey() {
 }
 
 module.exports = {
+  checkConfig,
   getAccessToken,
   createPaymentOrder,
   getCheckoutUrl,
