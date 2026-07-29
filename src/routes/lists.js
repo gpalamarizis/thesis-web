@@ -43,6 +43,14 @@ const LISTS = {
     required: ['name'],
     order: 'name',
   },
+  // Ιδιότητα σχετικού προσώπου (δικηγόρος, συμβολαιογράφος, μεσίτης...)
+  // Διαφορετικό από το eidos_sxesis: η ΙΔΙΟΤΗΤΑ είναι τι ΕΙΝΑΙ ο άνθρωπος,
+  // το ΕΙΔΟΣ ΣΧΕΣΗΣ είναι ο ρόλος του σε συγκεκριμένη υπόθεση.
+  idiotites: {
+    fields: ['name'],
+    required: ['name'],
+    order: 'name',
+  },
   pagia_exoda: {
     fields: ['name'],
     required: ['name'],

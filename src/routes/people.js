@@ -8,24 +8,46 @@ const { pickAllowed } = require('../utils/query');
 const router = express.Router();
 router.use(requireAuth);
 
-function makeCrud(basePath, table, fields, requiredField, orderBy) {
+function makeCrud(basePath, table, fields, requiredField, orderBy, opts = {}) {
   const r = express.Router();
+
+  // opts.select      -> custom SELECT (π.χ. με JOIN για ονόματα lookup)
+  // opts.extraWhere  -> fn(req, params, nextIndex) -> { clauses[], params[], next }
+  // opts.limit       -> default 500
 
   r.get('/', async (req, res) => {
     const orgId = req.user.organization_id;
-    const filters = ['organization_id = $1'];
+    const alias = opts.select ? 't.' : '';
+    const filters = [`${alias}organization_id = $1`];
     const params  = [orgId];
     let i = 2;
+
     if (req.query.q) {
-      filters.push(`(${['eponymo','onoma','eponymia','email'].filter(f=>fields.includes(f)).map(f=>`${f} ILIKE $${i}`).join(' OR ')})`);
-      params.push(`%${req.query.q}%`); i++;
+      const searchable = ['eponymo','onoma','eponymia','email'].filter(f => fields.includes(f));
+      if (searchable.length) {
+        filters.push(`(${searchable.map(f => `${alias}${f} ILIKE $${i}`).join(' OR ')})`);
+        params.push(`%${req.query.q}%`); i++;
+      }
     }
-    if (req.query.energos === 'true'  && fields.includes('energos')) filters.push('energos = TRUE');
-    if (req.query.energos === 'false' && fields.includes('energos')) filters.push('energos = FALSE');
+    if (req.query.energos === 'true'  && fields.includes('energos')) filters.push(`${alias}energos = TRUE`);
+    if (req.query.energos === 'false' && fields.includes('energos')) filters.push(`${alias}energos = FALSE`);
+
+    // Επιπλέον φίλτρα ανά πίνακα
+    if (typeof opts.extraWhere === 'function') {
+      const ex = opts.extraWhere(req, i);
+      if (ex && ex.clauses && ex.clauses.length) {
+        filters.push(...ex.clauses);
+        params.push(...ex.params);
+        i = ex.next;
+      }
+    }
+
+    const select = opts.select || `SELECT * FROM ${table} t`;
+    const limit  = opts.limit || 500;
 
     try {
       const q = await pool.query(
-        `SELECT * FROM ${table} WHERE ${filters.join(' AND ')} ORDER BY ${orderBy} LIMIT 500`,
+        `${select} WHERE ${filters.join(' AND ')} ORDER BY ${orderBy} LIMIT ${limit}`,
         params
       );
       res.json({ data: q.rows });
@@ -121,7 +143,73 @@ makeCrud(
   'eponymo'
 );
 
-// Σχετικά Πρόσωπα
+// ---------------------------------------------------------------------------
+// ΣΧΕΤΙΚΑ ΠΡΟΣΩΠΑ
+// Επιπλέον από το βασικό CRUD:
+//   * idiotita_id   — τι ΕΙΝΑΙ ο άνθρωπος (δικηγόρος, συμβολαιογράφος...)
+//   * paratiriseis  — εσωτερικές σημειώσεις/αξιολόγηση
+//   * φίλτρα: ?idiotita_id=  &poli=   (γεωγραφικό)
+//   * GET /related/cities        — οι πόλεις που υπάρχουν, για το φίλτρο
+//   * GET /related/:id/cases     — σε ποιες υποθέσεις εμφανίζεται
+// ---------------------------------------------------------------------------
+
+// ΠΡΟΣΟΧΗ: αυτά τα routes ΠΡΕΠΕΙ να δηλωθούν ΠΡΙΝ το makeCrud('/related'),
+// αλλιώς το γενικό GET /:id θα «έτρωγε» το /cities.
+const relatedExtra = express.Router();
+
+// Λίστα πόλεων (γραφείου ή οικίας) για το γεωγραφικό φίλτρο
+relatedExtra.get('/cities', async (req, res) => {
+  try {
+    const q = await pool.query(
+      `SELECT poli, COUNT(*)::int AS plithos FROM (
+         SELECT COALESCE(NULLIF(TRIM(poli_grafeiou), ''), NULLIF(TRIM(poli_oikias), '')) AS poli
+         FROM sxetika_prosopa
+         WHERE organization_id = $1
+       ) x
+       WHERE poli IS NOT NULL
+       GROUP BY poli
+       ORDER BY plithos DESC, poli`,
+      [req.user.organization_id]
+    );
+    res.json({ data: q.rows });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Σε ποιες υποθέσεις εμφανίζεται αυτό το πρόσωπο
+relatedExtra.get('/:id/cases', async (req, res) => {
+  const orgId = req.user.organization_id;
+  const pid = parseInt(req.params.id, 10);
+  if (!pid) return res.status(400).json({ error: 'bad id' });
+  try {
+    const q = await pool.query(
+      `SELECT DISTINCT
+              y.aa,
+              y.xeirokinito_id,
+              y.perilipsi,
+              y.date_eisagogis,
+              y.ekkremis,
+              es.name AS eidos_sxesis_name
+         FROM ypotheseis y
+         LEFT JOIN case_related_persons crp
+                ON crp.ypothesi_id = y.aa AND crp.sxetiko_prosopo_id = $2
+         LEFT JOIN eidos_sxesis es ON es.aa = crp.eidos_sxesis_id
+        WHERE y.organization_id = $1
+          AND (crp.sxetiko_prosopo_id = $2
+               OR y.aa = (SELECT ypotheseis_id FROM sxetika_prosopa
+                           WHERE aa = $2 AND organization_id = $1))
+        ORDER BY y.aa DESC
+        LIMIT 500`,
+      [orgId, pid]
+    );
+    res.json({ data: q.rows });
+  } catch (err) {
+    console.error('[related/:id/cases]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.use('/related', relatedExtra);
+
 makeCrud(
   '/related',
   'sxetika_prosopa',
@@ -133,9 +221,40 @@ makeCrud(
    'tilefono_grafeiou_1','tilefono_grafeiou_2','tilefono_grafeiou_3',
    'tilefono_kinito_1','tilefono_kinito_2','tilefono_kinito_3',
    'fax_1','fax_2','fax_3',
-   'eidos_sxesis_id','ypotheseis_id'],
+   'eidos_sxesis_id','ypotheseis_id',
+   'idiotita_id','paratiriseis'],
   null,
-  'eponymo, onoma'
+  't.eponymo, t.onoma',
+  {
+    // Φέρνουμε και τα ονόματα των lookup, για να μη χρειάζεται δεύτερη κλήση
+    select: `SELECT t.*,
+                    idt.name AS idiotita_name,
+                    es.name  AS eidos_sxesis_name,
+                    COALESCE(NULLIF(TRIM(t.poli_grafeiou), ''), NULLIF(TRIM(t.poli_oikias), '')) AS poli
+               FROM sxetika_prosopa t
+               LEFT JOIN idiotites    idt ON idt.aa = t.idiotita_id     AND idt.organization_id = t.organization_id
+               LEFT JOIN eidos_sxesis es  ON es.aa  = t.eidos_sxesis_id AND es.organization_id  = t.organization_id`,
+    extraWhere: (req, i) => {
+      const clauses = [], params = [];
+      // Φίλτρο ιδιότητας
+      if (req.query.idiotita_id) {
+        if (req.query.idiotita_id === 'none') {
+          clauses.push('t.idiotita_id IS NULL');
+        } else {
+          clauses.push(`t.idiotita_id = $${i}`);
+          params.push(parseInt(req.query.idiotita_id, 10)); i++;
+        }
+      }
+      // Γεωγραφικό φίλτρο — γραφείο Ή οικία
+      if (req.query.poli) {
+        clauses.push(
+          `(TRIM(COALESCE(t.poli_grafeiou, '')) ILIKE $${i} OR TRIM(COALESCE(t.poli_oikias, '')) ILIKE $${i})`
+        );
+        params.push(req.query.poli); i++;
+      }
+      return { clauses, params, next: i };
+    },
+  }
 );
 
 module.exports = router;
