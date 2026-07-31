@@ -238,6 +238,18 @@ makeCrud(
                LEFT JOIN eidos_sxesis es  ON es.aa  = t.eidos_sxesis_id AND es.organization_id  = t.organization_id`,
     extraWhere: (req, i) => {
       const clauses = [], params = [];
+
+      // ΔΙΑΧΩΡΙΣΜΟΣ ΑΝΤΙΔΙΚΩΝ
+      // Η αρχική migration έβαλε τους αντιδίκους ΚΑΙ στους δύο πίνακες:
+      // 1142 στο `antidikoi` και 1568 στα `sxetika_prosopa` με είδος
+      // σχέσης «Αντίδικος». Από τους 1568 μόνο 2 συνδέονται με υπόθεση.
+      // Είναι διπλοεγγραφές που μπερδεύουν τη λίστα σχετικών προσώπων.
+      //
+      // Εξ ορισμού ΔΕΝ εμφανίζονται εδώ. Με ?include_opponents=1 φαίνονται.
+      if (req.query.include_opponents !== '1') {
+        clauses.push(`(es.name IS NULL OR es.name <> 'Αντίδικος')`);
+      }
+
       // Φίλτρο ιδιότητας
       if (req.query.idiotita_id) {
         if (req.query.idiotita_id === 'none') {
