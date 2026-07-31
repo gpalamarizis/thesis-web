@@ -13,7 +13,7 @@
 //     αντί για το παγκόσμιο aa. Νέο γραφείο ξεκινά από 1.
 //   * Αν ο πελάτης δεν έχει ακόμα client_no, του ανατίθεται ο επόμενος
 //     διαθέσιμος για τον τύπο του, μέσα στον οργανισμό (με κλείδωμα).
-//   * orgCount = πλήθος υποθέσεων του γραφείου + 1 (όχι MAX(aa)).
+//   * orgCount = ΜΕΓΑΛΥΤΕΡΟ τρίτο πεδίο + 1 (ασφαλές σε διαγραφές).
 //   * clientCount = MAX δεύτερου πεδίου + 1, ώστε να μην επαναλαμβάνεται
 //     μετά από διαγραφή.
 
@@ -73,11 +73,21 @@ async function computeProtocolNumber(client, {
   const clientCount = perClient.rows[0].m + 1;
 
   // orgCount = πλήθος υποθέσεων του γραφείου + 1
+  // orgCount = ΜΕΓΑΛΥΤΕΡΟΣ υπάρχων αριθμός γραφείου + 1.
+  //
+  // ΓΙΑΤΙ ΟΧΙ COUNT(*): αν διαγραφεί υπόθεση, το πλήθος μειώνεται και ο
+  // επόμενος αριθμός θα ξαναδινόταν σε άλλη υπόθεση -> ΔΙΠΛΟ ΠΡΩΤΟΚΟΛΛΟ.
+  // Με MAX, όσες κι αν διαγραφούν, αριθμός δεν επαναλαμβάνεται ποτέ.
   const orgR = await client.query(
-    `SELECT COUNT(*)::int AS c FROM ypotheseis WHERE organization_id = $1`,
+    `SELECT COALESCE(MAX(
+              NULLIF(regexp_replace(xeirokinito_id, '^[0-9]+[ΦΝ]/[0-9]+/([0-9]+)$', '\\1'), '')::int
+            ), 0)::int AS m
+       FROM ypotheseis
+      WHERE organization_id = $1
+        AND xeirokinito_id ~ '^[0-9]+[ΦΝ]/[0-9]+/[0-9]+$'`,
     [organizationId]
   );
-  const orgCount = orgR.rows[0].c + 1;
+  const orgCount = orgR.rows[0].m + 1;
 
   return `${clientNo}${prefix}/${clientCount}/${orgCount}`;
 }
@@ -115,11 +125,17 @@ async function previewProtocolNumber(pool, { organizationId, clientType, clientI
   );
   const clientCount = perClient.rows[0].m + 1;
 
+  // Ίδια λογική με το computeProtocolNumber — MAX, όχι COUNT
   const orgR = await pool.query(
-    `SELECT COUNT(*)::int AS c FROM ypotheseis WHERE organization_id = $1`,
+    `SELECT COALESCE(MAX(
+              NULLIF(regexp_replace(xeirokinito_id, '^[0-9]+[ΦΝ]/[0-9]+/([0-9]+)$', '\\1'), '')::int
+            ), 0)::int AS m
+       FROM ypotheseis
+      WHERE organization_id = $1
+        AND xeirokinito_id ~ '^[0-9]+[ΦΝ]/[0-9]+/[0-9]+$'`,
     [organizationId]
   );
-  const orgCount = orgR.rows[0].c + 1;
+  const orgCount = orgR.rows[0].m + 1;
 
   return `${clientNo}${prefix}/${clientCount}/${orgCount}`;
 }

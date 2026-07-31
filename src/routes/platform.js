@@ -259,7 +259,7 @@ router.get('/organizations', async (req, res) => {
       LEFT JOIN partners p ON p.aa = o.referred_by_partner_id
       ${where}
       ORDER BY o.${validSort} ${validOrder}
-      LIMIT 200
+      LIMIT 5000
     `, params);
 
     res.json({ data: r.rows });
@@ -278,8 +278,8 @@ router.get('/organizations/:id', async (req, res) => {
           LEFT JOIN partners p ON p.aa = o.referred_by_partner_id
          WHERE o.id = $1`, [orgId]),
       pool.query(`SELECT id, email, first_name, last_name, role, is_active, created_at FROM users WHERE organization_id = $1 ORDER BY created_at ASC`, [orgId]),
-      pool.query(`SELECT * FROM subscriptions WHERE organization_id = $1 ORDER BY period_start DESC LIMIT 50`, [orgId]),
-      pool.query(`SELECT * FROM platform_activity_log WHERE target_type = 'organization' AND target_id = $1 ORDER BY created_at DESC LIMIT 50`, [orgId]),
+      pool.query(`SELECT * FROM subscriptions WHERE organization_id = $1 ORDER BY period_start DESC LIMIT 2000`, [orgId]),
+      pool.query(`SELECT * FROM platform_activity_log WHERE target_type = 'organization' AND target_id = $1 ORDER BY created_at DESC LIMIT 2000`, [orgId]),
     ]);
 
     if (org.rows.length === 0) return res.status(404).json({ error: 'Organization not found' });
@@ -434,7 +434,7 @@ router.get('/subscriptions', async (req, res) => {
         LEFT JOIN partners p ON p.aa = s.partner_id
         ${where}
         ORDER BY s.created_at DESC
-        LIMIT 500
+        LIMIT 5000
     `, params);
     res.json({ data: r.rows });
   } catch (err) {

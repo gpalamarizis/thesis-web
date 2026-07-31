@@ -43,7 +43,9 @@ function makeCrud(basePath, table, fields, requiredField, orderBy, opts = {}) {
     }
 
     const select = opts.select || `SELECT * FROM ${table} t`;
-    const limit  = opts.limit || 500;
+    // Ήταν 500 -> σε γραφεία με πολλούς αντιδίκους η λίστα κοβόταν
+    // αλφαβητικά (σταματούσε γύρω στο "Ι") και δεν έβρισκες τους υπόλοιπους.
+    const limit  = opts.limit || 5000;
 
     try {
       const q = await pool.query(
@@ -198,7 +200,7 @@ relatedExtra.get('/:id/cases', async (req, res) => {
                OR y.aa = (SELECT ypotheseis_id FROM sxetika_prosopa
                            WHERE aa = $2 AND organization_id = $1))
         ORDER BY y.aa DESC
-        LIMIT 500`,
+        LIMIT 5000`,
       [orgId, pid]
     );
     res.json({ data: q.rows });

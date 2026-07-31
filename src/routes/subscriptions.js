@@ -14,6 +14,15 @@ const { pool } = require('../db');
 const { requireAuth } = require('../middleware/auth');
 const viva = require('../services/viva');
 
+// Email service — αμυντικά, ώστε αν λείπει να μη σκάει όλο το route
+let emailSvc = null;
+try { emailSvc = require('../services/email'); } catch (_) { /* χωρίς email */ }
+async function tryEmail(fn, args) {
+  if (!emailSvc || typeof emailSvc[fn] !== 'function') return false;
+  try { await emailSvc[fn](args); return true; }
+  catch (e) { console.error(`[email ${fn}]`, e.message); return false; }
+}
+
 const router = express.Router();
 
 // ---------- ensure schema (idempotent) ----------
@@ -76,6 +85,27 @@ async function ensureSchema() {
     );
     CREATE INDEX IF NOT EXISTS idx_subs_org_status ON subscriptions(organization_id, status);
     CREATE INDEX IF NOT EXISTS idx_subs_viva_order ON subscriptions(viva_order_code);
+
+    -- Πληρωμή με τραπεζικό έμβασμα
+    ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS payment_reference VARCHAR(40);
+    ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS bank_matched_by   VARCHAR(20);
+    ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS bank_tx_id        VARCHAR(80);
+    CREATE INDEX IF NOT EXISTS idx_subs_payref ON subscriptions(payment_reference);
+
+    -- Ημερολόγιο ΟΛΩΝ των εισερχομένων στον λογαριασμό Viva.
+    -- Κρατάμε και όσα ΔΕΝ ταιριάξαμε, ώστε να μη χαθεί ποτέ κατάθεση.
+    CREATE TABLE IF NOT EXISTS bank_incoming (
+      aa             BIGSERIAL PRIMARY KEY,
+      wallet_tx_id   VARCHAR(80) UNIQUE,
+      amount         NUMERIC(12,2),
+      currency       VARCHAR(5),
+      description    TEXT,
+      matched_sub_id BIGINT,
+      status         VARCHAR(20) DEFAULT 'unmatched',
+      raw            JSONB,
+      created_at     TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_bank_incoming_status ON bank_incoming(status, created_at DESC);
   `);
   schemaEnsured = true;
 }
@@ -103,6 +133,9 @@ router.get('/subscriptions/health', requireAuth, async (req, res) => {
       oauth_token: tokenOk ? 'OK' : `ΑΠΕΤΥΧΕ: ${tokenErr}`,
       webhook_key: webhookKeyOk ? 'OK' : `ΑΠΕΤΥΧΕ: ${webhookErr}`,
       webhook_url: 'https://api.thesislegal.gr/api/viva/webhook',
+      // Χρήσιμο όταν ο λογαριασμός Viva είναι κοινός με άλλο προϊόν:
+      // το webhook θα δέχεται ΜΟΝΟ πληρωμές αυτού του source.
+      payment_source: process.env.VIVA_SOURCE_CODE || '(ΔΕΝ ΕΧΕΙ ΟΡΙΣΤΕΙ)',
       urls: cfg.urls,
     });
   } catch (err) {
@@ -210,6 +243,119 @@ router.post('/subscriptions/checkout', requireAuth, async (req, res) => {
   }
 });
 
+// ================ ΠΛΗΡΩΜΗ ΜΕ ΤΡΑΠΕΖΙΚΟ ΕΜΒΑΣΜΑ ================
+// Ο πελάτης δηλώνει ότι θα πληρώσει με έμβασμα.
+// Παίρνει IBAN + ΜΟΝΑΔΙΚΗ αιτιολογία που πρέπει να γράψει στην κατάθεση.
+// Όταν φτάσουν τα χρήματα, το webhook 2054 της Viva το πιάνει και
+// ενεργοποιεί αυτόματα (ή σε ειδοποιεί για χειροκίνητο έλεγχο).
+
+function makeReference(orgId) {
+  // Χωρίς 0/O/1/I για να μη μπερδεύεται ο πελάτης όταν το γράφει
+  const A = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let r = '';
+  for (let i = 0; i < 4; i++) r += A[Math.floor(Math.random() * A.length)];
+  return `THESIS-${orgId}-${r}`;
+}
+
+router.post('/subscriptions/bank-transfer', requireAuth, async (req, res) => {
+  await ensureSchema();
+  const orgId = req.user.organization_id;
+  const { plan_code, users } = req.body || {};
+  if (!plan_code) return res.status(400).json({ error: 'plan_code required' });
+
+  try {
+    const uR = await pool.query(
+      `SELECT role, email, first_name, last_name FROM users WHERE id = $1`,
+      [req.user.id]);
+    const u = uR.rows[0];
+    if (!u || (u.role !== 'admin' && u.role !== 'owner')) {
+      return res.status(403).json({ error: 'Μόνο ο υπεύθυνος του γραφείου μπορεί να αγοράσει' });
+    }
+
+    const pR = await pool.query(
+      `SELECT * FROM subscription_plans WHERE code = $1 AND active = TRUE`, [plan_code]);
+    if (pR.rows.length === 0) return res.status(404).json({ error: 'Το πλάνο δεν βρέθηκε' });
+    const plan = pR.rows[0];
+
+    const oR = await pool.query(
+      `SELECT id, name, billing_email, referred_by_partner_id FROM organizations WHERE id = $1`, [orgId]);
+    const org = oR.rows[0];
+    if (!org) return res.status(404).json({ error: 'Το γραφείο δεν βρέθηκε' });
+
+    const amount = Number(plan.price_year);
+    if (amount <= 0) return res.status(400).json({ error: 'Επικοινωνήστε μαζί μας για αυτό το πλάνο' });
+
+    const reference = makeReference(orgId);
+
+    await pool.query(`
+      INSERT INTO subscriptions (organization_id, plan_code, plan_type, max_users, storage_quota_mb,
+                                 amount_gross, currency, period_start, period_end,
+                                 status, payment_method, payment_reference, partner_id, notes)
+      VALUES ($1,$2,$3,$4,$5,$6,$7, NOW(), NOW() + INTERVAL '1 year',
+              'pending', 'bank_transfer', $8, $9, $10)
+    `, [orgId, plan.code, plan.plan_type, plan.max_users, plan.storage_quota_mb,
+        amount, plan.currency || 'EUR', reference, org.referred_by_partner_id,
+        `Αναμονή εμβάσματος — αιτιολογία ${reference}`]);
+
+    const iban = process.env.BANK_IBAN || '';
+    const beneficiary = process.env.BANK_BENEFICIARY || 'OB.AN IKE';
+    const bankName = process.env.BANK_NAME || '';
+
+    // Ειδοποίηση στον πελάτη
+    const to = org.billing_email || u.email;
+    if (to && emailSvc) {
+      await tryEmail('send', {
+        to,
+        subject: `Στοιχεία πληρωμής συνδρομής Thesis — ${reference}`,
+        html: `
+          <p>Γεια σας${u.first_name ? ' ' + u.first_name : ''},</p>
+          <p>Για την ενεργοποίηση της συνδρομής <strong>${plan.name}</strong>
+             παρακαλούμε καταθέστε το ποσό στον παρακάτω λογαριασμό:</p>
+          <table cellpadding="6" style="border-collapse:collapse">
+            <tr><td><strong>Δικαιούχος</strong></td><td>${beneficiary}</td></tr>
+            ${bankName ? `<tr><td><strong>Τράπεζα</strong></td><td>${bankName}</td></tr>` : ''}
+            <tr><td><strong>IBAN</strong></td><td><code>${iban}</code></td></tr>
+            <tr><td><strong>Ποσό</strong></td><td>${amount.toFixed(2)} EUR (πλέον ΦΠΑ)</td></tr>
+            <tr><td><strong>Αιτιολογία</strong></td>
+                <td><strong style="font-size:18px">${reference}</strong></td></tr>
+          </table>
+          <p style="background:#FEF3C7;padding:12px;border-radius:6px">
+            <strong>Σημαντικό:</strong> γράψτε την αιτιολογία
+            <strong>${reference}</strong> στην κατάθεση, ώστε να ενεργοποιηθεί
+            αυτόματα η συνδρομή σας.
+          </p>
+          <p>Μόλις εμφανιστούν τα χρήματα, η συνδρομή ενεργοποιείται και θα λάβετε επιβεβαίωση.</p>
+        `,
+      });
+    }
+
+    // Ειδοποίηση σε εσένα
+    if (process.env.ADMIN_NOTIFY_EMAIL) {
+      await tryEmail('send', {
+        to: process.env.ADMIN_NOTIFY_EMAIL,
+        subject: `[Thesis] Αναμονή εμβάσματος — ${org.name}`,
+        html: `<p><strong>${org.name}</strong> επέλεξε πληρωμή με έμβασμα.</p>
+               <p>Πλάνο: ${plan.name}<br>Ποσό: ${amount.toFixed(2)} EUR<br>
+                  Αιτιολογία: <strong>${reference}</strong></p>`,
+      });
+    }
+
+    res.json({
+      payment_method: 'bank_transfer',
+      reference,
+      amount,
+      plan_name: plan.name,
+      iban,
+      beneficiary,
+      bank_name: bankName,
+      message: 'Σας στείλαμε email με τα στοιχεία πληρωμής.',
+    });
+  } catch (err) {
+    console.error('[subscriptions/bank-transfer]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ================ VERIFY (fallback από success page) ================
 router.post('/subscriptions/verify', requireAuth, async (req, res) => {
   await ensureSchema();
@@ -252,6 +398,65 @@ router.post('/subscriptions/verify', requireAuth, async (req, res) => {
   }
 });
 
+// ============ PLATFORM ADMIN: εκκρεμείς & αταίριαστες καταθέσεις ============
+
+// Τι περιμένει πληρωμή
+router.get('/subscriptions/pending', requireAuth, async (req, res) => {
+  if (!req.user.is_platform_admin) return res.status(403).json({ error: 'platform admin only' });
+  await ensureSchema();
+  try {
+    const r = await pool.query(`
+      SELECT s.aa, s.organization_id, o.name AS org_name, s.plan_code,
+             s.amount_gross, s.payment_method, s.payment_reference,
+             s.created_at
+        FROM subscriptions s
+        LEFT JOIN organizations o ON o.id = s.organization_id
+       WHERE s.status = 'pending'
+       ORDER BY s.created_at DESC LIMIT 2000`);
+    res.json({ data: r.rows });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Καταθέσεις που ΔΕΝ ταίριαξαν αυτόματα
+router.get('/subscriptions/unmatched-transfers', requireAuth, async (req, res) => {
+  if (!req.user.is_platform_admin) return res.status(403).json({ error: 'platform admin only' });
+  await ensureSchema();
+  try {
+    const r = await pool.query(`
+      SELECT aa, wallet_tx_id, amount, currency, description, status, created_at
+        FROM bank_incoming
+       WHERE status IN ('unmatched', 'amount_mismatch')
+       ORDER BY created_at DESC LIMIT 2000`);
+    res.json({ data: r.rows });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Χειροκίνητη ενεργοποίηση — όταν η κατάθεση ήρθε χωρίς σωστή αιτιολογία
+router.post('/subscriptions/:id/activate-manual', requireAuth, async (req, res) => {
+  if (!req.user.is_platform_admin) return res.status(403).json({ error: 'platform admin only' });
+  await ensureSchema();
+  const subId = parseInt(req.params.id, 10);
+  const { bank_incoming_id, note } = req.body || {};
+  try {
+    const result = await activateSubscription({
+      order_code: null,
+      subscription_id: subId,
+      transaction_id: `MANUAL-${req.user.id}-${Date.now()}`,
+      reported_amount: null,
+      source: `χειροκίνητα από ${req.user.email || req.user.id}${note ? ' — ' + note : ''}`,
+    });
+    if (bank_incoming_id) {
+      await pool.query(
+        `UPDATE bank_incoming SET status = 'matched', matched_sub_id = $1 WHERE aa = $2`,
+        [subId, bank_incoming_id]);
+    }
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    console.error('[activate-manual]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ================ WEBHOOK ================
 // Viva calls GET first for verification key, then POST for events.
 router.get('/viva/webhook', async (req, res) => {
@@ -275,7 +480,13 @@ router.post('/viva/webhook', async (req, res) => {
   try {
     await ensureSchema();
 
-    // 1796 = Transaction Payment Created (επιτυχής πληρωμή)
+    // 2054 = Account Transaction Created — ΕΙΣΕΡΧΟΜΕΝΟ ΣΤΟΝ ΛΟΓΑΡΙΑΣΜΟ
+    // Εδώ πιάνουμε τα τραπεζικά εμβάσματα.
+    if (eventType === 2054) {
+      return handleAccountTransaction(evt, res);
+    }
+
+    // 1796 = Transaction Payment Created (επιτυχής πληρωμή με κάρτα/IRIS)
     // 1798 = Transaction Failed
     if (eventType !== 1796) {
       // Δεν μας αφορά — 200 ώστε να μη ξαναστείλει
@@ -286,6 +497,20 @@ router.post('/viva/webhook', async (req, res) => {
     }
     if (!orderCode) {
       return res.json({ ok: true, ignored: 'no OrderCode' });
+    }
+
+    // ΦΙΛΤΡΟ PAYMENT SOURCE
+    // Ο λογαριασμός Viva είναι ΚΟΙΝΟΣ με το GlobiPet (ίδια εταιρεία).
+    // Τα webhooks καταχωρούνται ανά ΛΟΓΑΡΙΑΣΜΟ, όχι ανά source — άρα εδώ
+    // φτάνουν ΚΑΙ οι πληρωμές του GlobiPet. Τις αγνοούμε ρητά.
+    const mySource = String(process.env.VIVA_SOURCE_CODE || '').trim();
+    const evtSource = String(evt.SourceCode || '').trim();
+    if (mySource && evtSource && evtSource !== mySource) {
+      console.log(`[viva webhook] Αγνοείται — source ${evtSource} (Thesis = ${mySource})`);
+      return res.json({ ok: true, ignored: `other payment source ${evtSource}` });
+    }
+    if (!mySource) {
+      console.warn('[viva webhook] ΠΡΟΣΟΧΗ: λείπει VIVA_SOURCE_CODE — δεν γίνεται φιλτράρισμα source');
     }
 
     const sR = await pool.query(
@@ -316,6 +541,149 @@ router.post('/viva/webhook', async (req, res) => {
   }
 });
 
+// ================ ΕΙΣΕΡΧΟΜΕΝΑ ΤΡΑΠΕΖΙΚΑ (webhook 2054) ================
+
+/**
+ * Το Viva στέλνει EventTypeId 2054 για ΚΑΘΕ κίνηση στον λογαριασμό.
+ * Μας ενδιαφέρουν μόνο τα ΕΙΣΕΡΧΟΜΕΝΑ (Amount > 0).
+ *
+ * Ψάχνουμε στο Description την αιτιολογία μας (THESIS-<org>-<4 chars>).
+ * Αν βρεθεί ΚΑΙ το ποσό ταιριάζει -> αυτόματη ενεργοποίηση.
+ * Αλλιώς -> καταγράφεται ως 'unmatched' και ειδοποιείσαι για χειροκίνητο έλεγχο.
+ *
+ * ΤΙΠΟΤΑ ΔΕΝ ΧΑΝΕΤΑΙ: κάθε εισερχόμενο μπαίνει στον πίνακα bank_incoming.
+ */
+async function handleAccountTransaction(evt, res) {
+  const amount = Number(evt.Amount || 0);
+  const txId = String(evt.WalletTransactionId || '');
+  const desc = String(evt.Description || '');
+
+  // Μόνο εισερχόμενα, ολοκληρωμένα
+  if (amount <= 0) return res.json({ ok: true, ignored: 'εξερχόμενο' });
+  if (evt.StatusId && evt.StatusId !== 'F') {
+    return res.json({ ok: true, ignored: `StatusId ${evt.StatusId}` });
+  }
+  if (!txId) return res.json({ ok: true, ignored: 'χωρίς WalletTransactionId' });
+
+  // Καταγραφή (idempotent — ίδιο txId δεν ξαναμπαίνει)
+  const ins = await pool.query(`
+    INSERT INTO bank_incoming (wallet_tx_id, amount, currency, description, raw)
+    VALUES ($1,$2,$3,$4,$5)
+    ON CONFLICT (wallet_tx_id) DO NOTHING
+    RETURNING aa`,
+    [txId, amount, evt.CurrencyCode === '978' ? 'EUR' : String(evt.CurrencyCode || ''),
+     desc, JSON.stringify(evt)]);
+
+  if (ins.rowCount === 0) {
+    return res.json({ ok: true, ignored: 'ήδη καταγεγραμμένο' });
+  }
+
+  // Αναζήτηση αιτιολογίας: THESIS-<ψηφία>-<4 χαρακτήρες>
+  // Κανονικοποίηση: κεφαλαία, χωρίς κενά/παύλες (οι τράπεζες τα αλλοιώνουν)
+  const norm = desc.toUpperCase().replace(/[\s\-_.]/g, '');
+  const m = norm.match(/THESIS(\d+)([A-Z0-9]{4})/);
+
+  let matched = null;
+  if (m) {
+    const ref = `THESIS-${m[1]}-${m[2]}`;
+    const r = await pool.query(
+      `SELECT * FROM subscriptions
+        WHERE payment_reference = $1 AND status = 'pending'
+        LIMIT 1`, [ref]);
+    if (r.rows.length) matched = r.rows[0];
+  }
+
+  // Εφεδρικά: μοναδικό pending με ΑΚΡΙΒΩΣ αυτό το ποσό τις τελευταίες 60 ημέρες
+  if (!matched) {
+    const r = await pool.query(`
+      SELECT * FROM subscriptions
+       WHERE status = 'pending' AND payment_method = 'bank_transfer'
+         AND created_at > NOW() - INTERVAL '60 days'
+         AND ABS(amount_gross - $1) < 0.01`, [amount]);
+    if (r.rows.length === 1) matched = r.rows[0];
+  }
+
+  if (!matched) {
+    console.warn(`[bank] ΑΤΑΙΡΙΑΣΤΗ ΚΑΤΑΘΕΣΗ ${amount} EUR — "${desc}"`);
+    if (process.env.ADMIN_NOTIFY_EMAIL) {
+      await tryEmail('send', {
+        to: process.env.ADMIN_NOTIFY_EMAIL,
+        subject: `[Thesis] Κατάθεση ${amount.toFixed(2)} EUR χωρίς αντιστοίχιση`,
+        html: `<p>Ήρθε κατάθεση που ΔΕΝ ταίριαξε αυτόματα.</p>
+               <p>Ποσό: <strong>${amount.toFixed(2)} EUR</strong><br>
+                  Αιτιολογία: <em>${desc || '(κενή)'}</em></p>
+               <p>Δες τις εκκρεμείς στο Platform Admin και ενεργοποίησε χειροκίνητα.</p>`,
+      });
+    }
+    return res.json({ ok: true, matched: false });
+  }
+
+  // Έλεγχος ποσού
+  const expected = Number(matched.amount_gross);
+  if (Math.abs(amount - expected) > 0.01) {
+    console.error(`[bank] ΔΙΑΦΟΡΑ ΠΟΣΟΥ ref=${matched.payment_reference}: ` +
+                  `αναμενόμενο ${expected}, ήρθε ${amount}`);
+    await pool.query(
+      `UPDATE bank_incoming SET status = 'amount_mismatch', matched_sub_id = $1
+        WHERE wallet_tx_id = $2`, [matched.aa, txId]);
+    if (process.env.ADMIN_NOTIFY_EMAIL) {
+      await tryEmail('send', {
+        to: process.env.ADMIN_NOTIFY_EMAIL,
+        subject: `[Thesis] Διαφορά ποσού — ${matched.payment_reference}`,
+        html: `<p>Αναμενόμενο: <strong>${expected.toFixed(2)} EUR</strong><br>
+                  Ήρθε: <strong>${amount.toFixed(2)} EUR</strong></p>
+               <p>Αιτιολογία: ${matched.payment_reference}</p>
+               <p>Δεν ενεργοποιήθηκε αυτόματα — έλεγξέ το.</p>`,
+      });
+    }
+    return res.json({ ok: true, matched: true, activated: false, reason: 'amount mismatch' });
+  }
+
+  // Ενεργοποίηση
+  await pool.query(
+    `UPDATE subscriptions SET bank_matched_by = $1, bank_tx_id = $2 WHERE aa = $3`,
+    [m ? 'reference' : 'amount', txId, matched.aa]);
+
+  const result = await activateSubscription({
+    order_code: null,
+    subscription_id: matched.aa,
+    transaction_id: txId,
+    reported_amount: amount,
+    source: 'bank_transfer',
+  });
+
+  await pool.query(
+    `UPDATE bank_incoming SET status = 'matched', matched_sub_id = $1 WHERE wallet_tx_id = $2`,
+    [matched.aa, txId]);
+
+  // Ειδοποιήσεις
+  const oR = await pool.query(
+    `SELECT name, billing_email FROM organizations WHERE id = $1`, [matched.organization_id]);
+  const org = oR.rows[0] || {};
+  if (org.billing_email) {
+    await tryEmail('sendSubscriptionActivated', {
+      to: org.billing_email,
+      firstName: '',
+      planName: matched.plan_code,
+      amount,
+      periodEnd: result?.period_end,
+    });
+  }
+  if (process.env.ADMIN_NOTIFY_EMAIL) {
+    await tryEmail('send', {
+      to: process.env.ADMIN_NOTIFY_EMAIL,
+      subject: `[Thesis] ✓ Ενεργοποιήθηκε — ${org.name || matched.organization_id}`,
+      html: `<p>Κατάθεση <strong>${amount.toFixed(2)} EUR</strong> ταίριαξε
+                (${m ? 'με αιτιολογία' : 'με ποσό'}) και η συνδρομή ενεργοποιήθηκε.</p>
+             <p>Γραφείο: ${org.name}<br>Πλάνο: ${matched.plan_code}<br>
+                Αιτιολογία: ${matched.payment_reference}</p>`,
+    });
+  }
+
+  console.log(`[bank] ✓ ${amount} EUR -> org=${matched.organization_id} ref=${matched.payment_reference}`);
+  return res.json({ ok: true, matched: true, activated: true });
+}
+
 // ================ helpers ================
 
 /**
@@ -339,7 +707,7 @@ function parseVivaAmount(v) {
  * Το ποσό που χρεώνεται είναι πάντα το ΑΠΟΘΗΚΕΥΜΕΝΟ (amount_gross της
  * συνδρομής). Το reported_amount από το Viva χρησιμοποιείται ΜΟΝΟ για έλεγχο.
  */
-async function activateSubscription({ order_code, transaction_id, reported_amount, source }) {
+async function activateSubscription({ order_code, subscription_id, transaction_id, reported_amount, source }) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -349,28 +717,34 @@ async function activateSubscription({ order_code, transaction_id, reported_amoun
       `SELECT COUNT(*)::int AS n FROM information_schema.tables
        WHERE table_schema='public' AND table_name='partners'`)).rows[0].n > 0;
 
+    // Εντοπισμός είτε με order_code (κάρτα/IRIS) είτε με aa (έμβασμα)
+    const byId = subscription_id != null;
+    const where = byId ? 's.aa = $1' : 's.viva_order_code = $1';
+    const key = byId ? subscription_id : order_code;
+    if (key == null) throw new Error('Χρειάζεται order_code ή subscription_id');
+
     const sql = hasPartners
       ? `SELECT s.*, p.commission_rate AS partner_commission_rate
            FROM subscriptions s
            LEFT JOIN partners p ON p.aa = s.partner_id
-          WHERE s.viva_order_code = $1
+          WHERE ${where}
           FOR UPDATE OF s
           LIMIT 1`
       : `SELECT s.*, NULL::numeric AS partner_commission_rate
            FROM subscriptions s
-          WHERE s.viva_order_code = $1
+          WHERE ${where}
           FOR UPDATE
           LIMIT 1`;
 
-    const sR = await client.query(sql, [order_code]);
-    if (sR.rows.length === 0) throw new Error(`Δεν βρέθηκε συνδρομή για order ${order_code}`);
+    const sR = await client.query(sql, [key]);
+    if (sR.rows.length === 0) throw new Error(`Δεν βρέθηκε συνδρομή (${byId ? 'aa=' : 'order='}${key})`);
     const sub = sR.rows[0];
     const orgId = sub.organization_id;
 
     // Ήδη ενεργή -> τίποτα (idempotent, το Viva μπορεί να στείλει 2 φορές)
     if (sub.status === 'active') {
       await client.query('COMMIT');
-      console.log(`[activate] order=${order_code} ήδη ενεργή, παραλείπεται (${source})`);
+      console.log(`[activate] ${byId ? 'aa='+subscription_id : 'order='+order_code} ήδη ενεργή (${source})`);
       return { alreadyActive: true, organization_id: orgId };
     }
 
@@ -380,7 +754,7 @@ async function activateSubscription({ order_code, transaction_id, reported_amoun
       const diff = Math.abs(reported_amount - expected);
       if (diff > 0.01) {
         console.error(
-          `[activate] ΔΙΑΦΟΡΑ ΠΟΣΟΥ order=${order_code}: ` +
+          `[activate] ΔΙΑΦΟΡΑ ΠΟΣΟΥ ${byId ? 'aa='+subscription_id : 'order='+order_code}: ` +
           `αναμενόμενο ${expected.toFixed(2)} EUR, πληρώθηκε ${reported_amount.toFixed(2)} EUR ` +
           `(διαφορά ${diff.toFixed(2)}) — ΕΛΕΓΞΕ ΤΟ ΧΕΙΡΟΚΙΝΗΤΑ`
         );
@@ -444,7 +818,7 @@ async function activateSubscription({ order_code, transaction_id, reported_amoun
 
     await client.query('COMMIT');
     console.log(`[activate] ✓ org=${orgId} plan=${sub.plan_code} ` +
-                `ends=${newEnd.toISOString().slice(0,10)} order=${order_code} (${source})`);
+                `ends=${newEnd.toISOString().slice(0,10)} (${source})`);
     return { activated: true, organization_id: orgId, period_end: newEnd };
   } catch (err) {
     await client.query('ROLLBACK');

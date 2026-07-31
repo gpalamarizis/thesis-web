@@ -50,7 +50,7 @@ router.get('/by-client', async (req, res) => {
         WHERE y.organization_id = $1
           AND y.${clientCol} = $2
         ORDER BY y.date_eisagogis DESC NULLS LAST, y.aa DESC
-        LIMIT 100`,
+        LIMIT 5000`,
       [orgId, clientId]
     );
     res.json({ data: r.rows });
@@ -112,71 +112,6 @@ router.get('/', async (req, res) => {
     params.push(parseInt(req.query.nomiko_prosopo_id, 10)); i++;
   }
 
-  // ---- v3: server-side φίλτρα, το καθένα δουλεύει ανεξάρτητα ----
-
-  // Είδος υπόθεσης (ypotheseis_onomasies) π.χ. 207 = Αγοραπωλησία (Ακινήτου)
-  if (req.query.onomasia_id) {
-    filters.push(`y.onomasia_id = $${i}`);
-    params.push(parseInt(req.query.onomasia_id, 10)); i++;
-  }
-
-  // Χειριστής δικηγόρος: ταιριάζει ΚΑΙ σε επίπεδο υπόθεσης ΚΑΙ σε επίπεδο
-  // δικαστικής ενέργειας. Ήταν ο λόγος που δεν έβγαιναν αποτελέσματα.
-  if (req.query.dikigoros_id) {
-    filters.push(`(
-      EXISTS (SELECT 1 FROM xeiristes_dikigoroi xd
-               WHERE xd.ypotheseis_id = y.aa
-                 AND xd.organization_id = y.organization_id
-                 AND xd.dikigoroi_grafeiou_id = $${i})
-      OR EXISTS (SELECT 1 FROM dikastiria_energeies de2
-                  JOIN dikastiria_dikigoroi dd2 ON dd2.dikastiki_energeia_id = de2.aa
-                 WHERE de2.ypothesi_id = y.aa
-                   AND de2.organization_id = y.organization_id
-                   AND dd2.dikigoros_id = $${i})
-    )`);
-    params.push(parseInt(req.query.dikigoros_id, 10)); i++;
-  }
-
-  // Αντίδικος: είτε ο αντίδικος της υπόθεσης, είτε σε κάποια δικαστική ενέργεια
-  if (req.query.antidikos_id) {
-    filters.push(`(
-      y.diadikos_id = $${i}
-      OR EXISTS (SELECT 1 FROM dikastiria_energeies de3
-                  WHERE de3.ypothesi_id = y.aa
-                    AND de3.organization_id = y.organization_id
-                    AND de3.antidikos_id = $${i})
-    )`);
-    params.push(parseInt(req.query.antidikos_id, 10)); i++;
-  }
-
-  // Διαδικασία: ΔΕΝ υπάρχει στον πίνακα ypotheseis, μόνο στις δικαστικές ενέργειες
-  if (req.query.diadikasia_id) {
-    filters.push(`EXISTS (SELECT 1 FROM dikastiria_energeies de4
-                           WHERE de4.ypothesi_id = y.aa
-                             AND de4.organization_id = y.organization_id
-                             AND de4.diadikasia_id = $${i})`);
-    params.push(parseInt(req.query.diadikasia_id, 10)); i++;
-  }
-
-  // Δικαστήριο
-  if (req.query.dikastirio_id) {
-    filters.push(`EXISTS (SELECT 1 FROM dikastiria_energeies de5
-                           WHERE de5.ypothesi_id = y.aa
-                             AND de5.organization_id = y.organization_id
-                             AND de5.dikastirio_id = $${i})`);
-    params.push(parseInt(req.query.dikastirio_id, 10)); i++;
-  }
-
-  // Εύρος ημερομηνίας εισαγωγής
-  if (req.query.from) { filters.push(`y.date_eisagogis >= $${i}`); params.push(req.query.from); i++; }
-  if (req.query.to)   { filters.push(`y.date_eisagogis <= $${i}`); params.push(req.query.to);   i++; }
-
-  // Θέση αρχειοθέτησης
-  if (req.query.thesi_arxeiothetisis_id) {
-    filters.push(`y.thesi_arxeiothetisis_id = $${i}`);
-    params.push(parseInt(req.query.thesi_arxeiothetisis_id, 10)); i++;
-  }
-
   // Apply case-level visibility filter (skip for owner or shared mode)
   const vis = await buildCaseVisibilityFilter(req.user, i);
   if (vis.and) { filters.push(vis.and.replace(/^ AND /, '')); params.push(...vis.params); }
@@ -191,18 +126,7 @@ router.get('/', async (req, res) => {
               ta.name AS thesi_arxeiothetisis_name,
               a.eponymo AS antidikos_eponymo,
               fp.eponymo || ' ' || COALESCE(fp.onoma,'') AS fysiko_full_name,
-              np.eponymia AS nomiko_eponymia,
-              -- v3: οι χειριστές επιστρέφονται πλέον σε κάθε υπόθεση.
-              -- Χωρίς αυτό, κάθε client-side φίλτρο σε "xeiristes" έβγαζε μηδέν.
-              COALESCE((
-                SELECT json_agg(json_build_object(
-                         'aa', dg.aa, 'eponymo', dg.eponymo, 'onoma', dg.onoma
-                       ) ORDER BY dg.eponymo, dg.onoma)
-                  FROM xeiristes_dikigoroi xd
-                  JOIN dikigoroi_grafeiou dg ON dg.aa = xd.dikigoroi_grafeiou_id
-                 WHERE xd.ypotheseis_id = y.aa
-                   AND xd.organization_id = y.organization_id
-              ), '[]'::json) AS xeiristes
+              np.eponymia AS nomiko_eponymia
          FROM ypotheseis y
     LEFT JOIN ypotheseis_onomasies yo ON yo.aa = y.onomasia_id
     LEFT JOIN thesi                  th ON th.aa = y.thesi
@@ -491,7 +415,7 @@ router.get('/:id/same-client', async (req, res) => {
           AND y.aa != $2
           AND ${clientFilter}
         ORDER BY y.date_eisagogis DESC NULLS LAST
-        LIMIT 100`,
+        LIMIT 5000`,
       params
     );
     res.json({ data: r.rows });
@@ -583,7 +507,9 @@ router.get('/:id/suggestions', async (req, res) => {
          LEFT JOIN nomika_prosopa np ON np.aa = y.nomiko_prosopo_id
         WHERE y.organization_id = $1
           AND y.aa <> ALL($2::bigint[])
-        LIMIT 500`,
+        -- ΠΡΟΣΟΧΗ: αυτό ΔΕΝ είναι όριο εμφάνισης — είναι πόσες υποθέσεις
+        -- σαρώνει ο αλγόριθμος ομοιότητας. Πολύ μεγάλο = αργή πρόταση.
+        LIMIT 3000`,
       useText ? [orgId, excludeIds, cur.perilipsi] : [orgId, excludeIds]
     );
 
