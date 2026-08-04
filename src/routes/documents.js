@@ -190,6 +190,19 @@ router.get('/:id/download-url', async (req, res) => {
     if (r.rows.length === 0) return res.status(404).json({ error: 'Not found' });
 
     const doc = r.rows[0];
+
+    // Το αρχείο λείπει από το R2 — καθαρό μήνυμα αντί για σφάλμα λήψης.
+    // (σημαίνεται από το simansi-eleipsi.js μετά τη μεταφορά)
+    if (doc.file_missing) {
+      return res.status(410).json({
+        error: 'Το αρχείο δεν είναι διαθέσιμο.',
+        detail: 'Η εγγραφή υπάρχει στο σύστημα, αλλά το αρχείο δεν βρέθηκε ' +
+                'στον αποθηκευτικό χώρο. Πιθανόν δεν μεταφέρθηκε από το παλιό σύστημα.',
+        file_missing: true,
+        filename: doc.filename,
+      });
+    }
+
     const url = await getSignedUrl(
       getS3(),
       new GetObjectCommand({
