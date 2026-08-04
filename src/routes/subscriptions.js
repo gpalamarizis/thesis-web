@@ -143,6 +143,39 @@ router.get('/subscriptions/health', requireAuth, async (req, res) => {
   }
 });
 
+// ================ ΥΠΟΛΟΓΙΣΜΟΣ ΤΙΜΗΣ ================
+/**
+ * Τιμολόγηση ΑΝΑ ΧΡΗΣΤΗ, με ΦΠΑ πάνω από την τιμή.
+ *   3 χρήστες × 180 € = 540 € καθαρά + 24% ΦΠΑ = 669,60 €
+ *
+ * Επιστρέφει { users, perUser, net, vat, gross, vatRate }
+ * ή { error } αν ο αριθμός χρηστών δεν επιτρέπεται.
+ */
+function ypologismos(plan, requestedUsers) {
+  const perUser = Number(plan.price_per_user_year ?? plan.price_year);
+  if (!Number.isFinite(perUser) || perUser <= 0) {
+    return { error: 'Το πλάνο δεν έχει έγκυρη τιμή' };
+  }
+
+  const min = Number(plan.min_users || 1);
+  const max = Number(plan.max_users_allowed || plan.max_users || min);
+  const users = parseInt(requestedUsers, 10) || min;
+
+  if (users < min) {
+    return { error: `Το πλάνο ${plan.name} ξεκινά από ${min} ${min === 1 ? 'χρήστη' : 'χρήστες'}` };
+  }
+  if (users > max) {
+    return { error: `Το πλάνο ${plan.name} καλύπτει έως ${max} χρήστες. Επικοινωνήστε μαζί μας για περισσότερους.` };
+  }
+
+  const vatRate = Number(plan.vat_rate ?? 24);
+  const net = Math.round(perUser * users * 100) / 100;
+  const vat = Math.round(net * vatRate) / 100;
+  const gross = Math.round((net + vat) * 100) / 100;
+
+  return { users, perUser, net, vat, gross, vatRate };
+}
+
 // ================ PLANS ================
 router.get('/subscriptions/plans', requireAuth, async (req, res) => {
   await ensureSchema();
@@ -185,7 +218,7 @@ router.get('/subscriptions/current', requireAuth, async (req, res) => {
 router.post('/subscriptions/checkout', requireAuth, async (req, res) => {
   await ensureSchema();
   const orgId = req.user.organization_id;
-  const { plan_code } = req.body || {};
+  const { plan_code, users } = req.body || {};
   if (!plan_code) return res.status(400).json({ error: 'plan_code required' });
 
   try {
@@ -200,7 +233,19 @@ router.post('/subscriptions/checkout', requireAuth, async (req, res) => {
     if (pR.rows.length === 0) return res.status(404).json({ error: 'Plan not found' });
     const plan = pR.rows[0];
 
-    if (Number(plan.price_year) <= 0) return res.status(400).json({ error: 'Plan has zero price - contact admin' });
+    // Υπολογισμός με βάση τον αριθμό χρηστών + ΦΠΑ
+    const calc = ypologismos(plan, users);
+    if (calc.error) return res.status(400).json({ error: calc.error });
+
+    // Δεν επιτρέπουμε λιγότερους χρήστες από όσους έχει ήδη ενεργούς
+    const activeUsers = (await pool.query(
+      `SELECT COUNT(*)::int AS c FROM users WHERE organization_id = $1 AND is_active = TRUE`,
+      [orgId])).rows[0].c;
+    if (calc.users < activeUsers) {
+      return res.status(400).json({
+        error: `Έχετε ${activeUsers} ενεργούς χρήστες. Δεν μπορείτε να αγοράσετε άδειες για λιγότερους.`,
+      });
+    }
 
     const oR = await pool.query(`SELECT id, name, billing_email, referred_by_partner_id FROM organizations WHERE id = $1`, [orgId]);
     const org = oR.rows[0];
@@ -210,32 +255,39 @@ router.post('/subscriptions/checkout', requireAuth, async (req, res) => {
     const orderId = `THESIS-${orgId}-${plan.code}-${Date.now()}`;
 
     const { orderCode } = await viva.createPaymentOrder({
-      amount: Number(plan.price_year),
+      amount: calc.gross,                     // ΜΕ ΦΠΑ — αυτό χρεώνεται
       customerEmail: org.billing_email || u.email,
       customerName: `${u.first_name || ''} ${u.last_name || ''}`.trim() || org.name,
       orderId,
-      description: `${plan.name} — ${org.name}`,
+      description: `${plan.name} ${calc.users} ${calc.users === 1 ? 'χρήστης' : 'χρήστες'} — ${org.name}`,
     });
 
     // Store a pending subscription (status='pending') που θα γίνει 'active' μετά το webhook
     await pool.query(`
       INSERT INTO subscriptions (organization_id, plan_code, plan_type, max_users, storage_quota_mb,
-                                 amount_gross, currency, period_start, period_end,
+                                 amount_gross, amount_net, vat_amount, users_purchased,
+                                 currency, period_start, period_end,
                                  status, viva_order_code, partner_id, commission_rate, notes)
-      VALUES ($1,$2,$3,$4,$5,$6,$7, NOW(), NOW() + INTERVAL '1 year',
-              'pending', $8, $9, NULL, $10)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, NOW(), NOW() + INTERVAL '1 year',
+              'pending', $11, $12, NULL, $13)
     `, [
-      orgId, plan.code, plan.plan_type, plan.max_users, plan.storage_quota_mb,
-      plan.price_year, plan.currency || 'EUR',
+      orgId, plan.code, plan.plan_type, calc.users, plan.storage_quota_mb,
+      calc.gross, calc.net, calc.vat, calc.users,
+      plan.currency || 'EUR',
       String(orderCode), org.referred_by_partner_id,
-      `orderId: ${orderId}`
+      `orderId: ${orderId} | ${calc.users} χρήστες × ${calc.perUser}€ = ${calc.net}€ + ΦΠΑ ${calc.vat}€`
     ]);
 
     res.json({
       order_code: orderCode,
       checkout_url: viva.getCheckoutUrl(orderCode),
-      amount: Number(plan.price_year),
       plan_name: plan.name,
+      users: calc.users,
+      price_per_user: calc.perUser,
+      amount_net: calc.net,
+      vat_rate: calc.vatRate,
+      vat_amount: calc.vat,
+      amount: calc.gross,          // αυτό χρεώνεται
     });
   } catch (err) {
     console.error('[subscriptions/checkout]', err);
@@ -282,20 +334,32 @@ router.post('/subscriptions/bank-transfer', requireAuth, async (req, res) => {
     const org = oR.rows[0];
     if (!org) return res.status(404).json({ error: 'Το γραφείο δεν βρέθηκε' });
 
-    const amount = Number(plan.price_year);
-    if (amount <= 0) return res.status(400).json({ error: 'Επικοινωνήστε μαζί μας για αυτό το πλάνο' });
+    const calc = ypologismos(plan, users);
+    if (calc.error) return res.status(400).json({ error: calc.error });
 
+    const activeUsers = (await pool.query(
+      `SELECT COUNT(*)::int AS c FROM users WHERE organization_id = $1 AND is_active = TRUE`,
+      [orgId])).rows[0].c;
+    if (calc.users < activeUsers) {
+      return res.status(400).json({
+        error: `Έχετε ${activeUsers} ενεργούς χρήστες. Δεν μπορείτε να αγοράσετε άδειες για λιγότερους.`,
+      });
+    }
+
+    const amount = calc.gross;   // ΜΕ ΦΠΑ
     const reference = makeReference(orgId);
 
     await pool.query(`
       INSERT INTO subscriptions (organization_id, plan_code, plan_type, max_users, storage_quota_mb,
-                                 amount_gross, currency, period_start, period_end,
+                                 amount_gross, amount_net, vat_amount, users_purchased,
+                                 currency, period_start, period_end,
                                  status, payment_method, payment_reference, partner_id, notes)
-      VALUES ($1,$2,$3,$4,$5,$6,$7, NOW(), NOW() + INTERVAL '1 year',
-              'pending', 'bank_transfer', $8, $9, $10)
-    `, [orgId, plan.code, plan.plan_type, plan.max_users, plan.storage_quota_mb,
-        amount, plan.currency || 'EUR', reference, org.referred_by_partner_id,
-        `Αναμονή εμβάσματος — αιτιολογία ${reference}`]);
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, NOW(), NOW() + INTERVAL '1 year',
+              'pending', 'bank_transfer', $11, $12, $13)
+    `, [orgId, plan.code, plan.plan_type, calc.users, plan.storage_quota_mb,
+        calc.gross, calc.net, calc.vat, calc.users,
+        plan.currency || 'EUR', reference, org.referred_by_partner_id,
+        `Αναμονή εμβάσματος ${reference} — ${calc.users} χρήστες × ${calc.perUser}€ + ΦΠΑ`]);
 
     const iban = process.env.BANK_IBAN || '';
     const beneficiary = process.env.BANK_BENEFICIARY || 'OB.AN IKE';
@@ -315,7 +379,10 @@ router.post('/subscriptions/bank-transfer', requireAuth, async (req, res) => {
             <tr><td><strong>Δικαιούχος</strong></td><td>${beneficiary}</td></tr>
             ${bankName ? `<tr><td><strong>Τράπεζα</strong></td><td>${bankName}</td></tr>` : ''}
             <tr><td><strong>IBAN</strong></td><td><code>${iban}</code></td></tr>
-            <tr><td><strong>Ποσό</strong></td><td>${amount.toFixed(2)} EUR (πλέον ΦΠΑ)</td></tr>
+            <tr><td><strong>Πλάνο</strong></td><td>${plan.name} — ${calc.users} ${calc.users === 1 ? 'χρήστης' : 'χρήστες'}</td></tr>
+            <tr><td>Καθαρή αξία</td><td>${calc.net.toFixed(2)} EUR (${calc.users} × ${calc.perUser.toFixed(2)} EUR)</td></tr>
+            <tr><td>ΦΠΑ ${calc.vatRate}%</td><td>${calc.vat.toFixed(2)} EUR</td></tr>
+            <tr><td><strong>Πληρωτέο ποσό</strong></td><td><strong style="font-size:17px">${calc.gross.toFixed(2)} EUR</strong></td></tr>
             <tr><td><strong>Αιτιολογία</strong></td>
                 <td><strong style="font-size:18px">${reference}</strong></td></tr>
           </table>
@@ -343,8 +410,13 @@ router.post('/subscriptions/bank-transfer', requireAuth, async (req, res) => {
     res.json({
       payment_method: 'bank_transfer',
       reference,
-      amount,
       plan_name: plan.name,
+      users: calc.users,
+      price_per_user: calc.perUser,
+      amount_net: calc.net,
+      vat_rate: calc.vatRate,
+      vat_amount: calc.vat,
+      amount: calc.gross,
       iban,
       beneficiary,
       bank_name: bankName,
