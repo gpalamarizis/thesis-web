@@ -191,6 +191,18 @@ router.get('/subscriptions/plans', requireAuth, async (req, res) => {
 router.get('/subscriptions/current', requireAuth, async (req, res) => {
   await ensureSchema();
   const orgId = req.user.organization_id;
+
+  // Ο platform admin ΔΕΝ ανήκει σε γραφείο (organization_id = NULL).
+  // Χωρίς αυτόν τον έλεγχο, το org.rows[0] είναι undefined και η σελίδα σκάει.
+  if (!orgId) {
+    return res.json({
+      organization: null,
+      subscription: null,
+      usage: { active_users: 0, storage_bytes_used: 0, storage_quota_mb: 0 },
+      note: 'Ο λογαριασμός δεν ανήκει σε γραφείο (platform admin).',
+    });
+  }
+
   try {
     const [org, sub, storage] = await Promise.all([
       pool.query(`SELECT id, name, plan_type, plan_code, max_users, storage_quota_mb, subscription_status, trial_ends_at, subscription_ends_at, suspended, billing_email, billing_afm, billing_phone FROM organizations WHERE id = $1`, [orgId]),
@@ -200,13 +212,14 @@ router.get('/subscriptions/current', requireAuth, async (req, res) => {
     const [users] = await Promise.all([
       pool.query(`SELECT COUNT(*)::int AS c FROM users WHERE organization_id = $1 AND is_active = TRUE`, [orgId]),
     ]);
+    const o = org.rows[0] || null;
     res.json({
-      organization: org.rows[0],
+      organization: o,
       subscription: sub.rows[0] || null,
       usage: {
-        active_users: users.rows[0].c,
-        storage_bytes_used: Number(storage.rows[0].bytes_used || 0),
-        storage_quota_mb: org.rows[0].storage_quota_mb,
+        active_users: users.rows[0]?.c || 0,
+        storage_bytes_used: Number(storage.rows[0]?.bytes_used || 0),
+        storage_quota_mb: o?.storage_quota_mb || 0,
       },
     });
   } catch (err) {
